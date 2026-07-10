@@ -1,0 +1,29 @@
+# credenciais / segredos — NUNCA versionar
+.env
+.streamlit/secrets.toml
+*.pem
+*.key
+
+# dados (LGPD: relatórios contêm dados de pedidos reais)
+reports/*
+!reports/.gitkeep
+tmp_csvs/*
+!tmp_csvs/.gitkeep
+*.db
+*.sqlite*
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ide / os
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# RPA — perfil de navegador logado e evidências (NUNCA versionar)
+_rpa_meli_profile/
+_rpa_meli_valida/
