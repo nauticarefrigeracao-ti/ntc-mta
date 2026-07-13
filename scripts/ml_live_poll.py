@@ -36,14 +36,34 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import processar_relatorios_mp as rel
+from ml_orders_sync import sync_orders
 from src.db.connection import get_db_connection
 
 LIVE_NAME = "painel_devolucoes_live"
 
 
 def run_cycle(output_dir: Path, janela_dias: int, ttl_min: int, workers: int) -> None:
-    """Um ciclo: seleciona pedidos 'vivos' → revalida na ML API → regenera o painel."""
+    """Um ciclo: sync de pedidos novos (API) → revalida estados → regenera o painel."""
     t0 = time.monotonic()
+    # 1. pedidos novos/estados de pedido direto da API (fonte primária)
+    try:
+        from datetime import timedelta, timezone
+        desde = (datetime.now(timezone.utc) - timedelta(days=janela_dias)).strftime("%Y-%m-%d")
+        sync_orders(desde)
+    except Exception as exc:
+        print(f"  ⚠ sync orders falhou (segue com a base atual): {type(exc).__name__}: {exc}")
+
+    # 1b. coleta de saldos da página (RPA) — só disputas novas/defasadas (>20h),
+    # em lote pequeno para o ciclo continuar rápido; requer sessão salva no perfil
+    try:
+        import subprocess
+        subprocess.run(
+            [sys.executable, "-u", str(ROOT / "scripts" / "coletar_saldos_meli.py"),
+             "--de", desde, "--ate", datetime.now().strftime("%Y-%m-%d"), "--max", "60"],
+            timeout=900, check=False,
+        )
+    except Exception as exc:
+        print(f"  ⚠ coleta de saldos falhou (segue): {type(exc).__name__}: {exc}")
     conn = get_db_connection()
     try:
         rel._ensure_validation_table(conn)

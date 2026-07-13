@@ -167,10 +167,11 @@ def _parse_mp_file(path: Path) -> pd.DataFrame:
     df.columns = [c.strip() for c in df.columns]
     df = df.rename(columns={k: v for k, v in _COL_MAP.items() if k in df.columns})
 
-    # Remover linhas completamente vazias ou sem order_id
-    if "order_id" in df.columns:
-        df = df.dropna(subset=["order_id"])
-        df = df[df["order_id"].str.strip() != ""]
+    # Remover apenas linhas sem NENHUMA chave: reembolsos diretos ('refunded')
+    # vêm sem order_id no relatório MP, mas têm id_transacao — devem entrar.
+    oid = df["order_id"].fillna("").astype(str).str.strip() if "order_id" in df.columns else pd.Series("", index=df.index)
+    itx = df["id_transacao"].fillna("").astype(str).str.strip() if "id_transacao" in df.columns else pd.Series("", index=df.index)
+    df = df[(oid != "") | (itx != "")]
 
     return df
 
