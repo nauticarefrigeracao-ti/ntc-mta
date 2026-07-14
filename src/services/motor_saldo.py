@@ -54,6 +54,35 @@ def _best_payment(pays: list) -> dict:
         -float(p.get("transaction_amount") or 0)))
 
 
+def _fat_ledger(order_id: int) -> dict | None:
+    """Consulta o LIVRO-RAZÃO real de tarifas (faturamento_ml, baixado via RPA
+    da seção Faturamento > Tarifas e pagamentos). É a fonte mais autoritativa
+    que existe — vem direto do sistema de cobrança do ML, não de heurística.
+    Cobre pedidos de mar-jun/2026 (ver scripts/importar_faturamento.py).
+    Retorna None se o pedido não está no período coberto."""
+    try:
+        from src.db.connection import get_db_connection
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    SUM(valor) FILTER (WHERE detalhe ILIKE '%%vender%%' OR detalhe ILIKE '%%cobrar%%'
+                                              OR detalhe ILIKE '%%parcelamento%%') AS tarifa_venda_liq,
+                    SUM(valor) FILTER (WHERE detalhe ILIKE '%%envio%%' AND detalhe NOT ILIKE '%%devolu%%') AS envio_liq,
+                    SUM(valor) FILTER (WHERE detalhe ILIKE '%%devolu%%') AS devolucao_liq,
+                    COUNT(*) AS n
+                FROM faturamento_ml WHERE order_id = %s
+            """, (order_id,))
+            row = cur.fetchone()
+        conn.close()
+        if not row or not row[3]:
+            return None
+        return {"tarifa_venda_liq": float(row[0] or 0), "envio_liq": float(row[1] or 0),
+                "devolucao_liq": float(row[2] or 0)}
+    except Exception:
+        return None
+
+
 def _frete_ida(ship_id) -> float | None:
     if not ship_id:
         return None
@@ -121,10 +150,34 @@ def _estornos(tarifa_venda: float, frete_ida: float, tarifa_dev: float,
         if proc["devolucao_fisica"] and not proc.get("culpa_vendedor", True):
             est += frete_ida
             regras.append("E4_frete_arrependimento")
-    if tarifa_dev > 0.005 and proc.get("reverso_status") == "em_transito":
-        est += tarifa_dev
-        regras.append("E3_tarifa_dev_em_transito")
+        # E5: 'produto não recebido' — falha logística (não é culpa do vendedor
+        # nem do comprador) → frete de ida estornado (QA: 65/65 no cluster PNR*;
+        # PDD9947 tem o MESMO rótulo "Produto não recebido", código diferente)
+        _mot = str(proc.get("motivo") or "")
+        if _mot.startswith("PNR") or _mot == "PDD9947":
+            est += frete_ida
+            regras.append("E5_frete_nao_recebido")
+    # E3 REMOVIDA (era da iteração 3, hipótese pré-culpa_vendedor: "estorna
+    # tarifa_dev enquanto em trânsito"). Com culpa_vendedor correto (rótulos
+    # reais), cobra_dev já decide certo se a tarifa é devida — E3 duplicava a
+    # lógica e ZERAVA cobranças válidas (prova: pedido 2000017193465086,
+    # motivo PDD9950/defeito, em_transito — E3 estornava errado a tarifa que
+    # a página cobra; pedido 2000015813757634, mesmo motivo mas finalizado,
+    # bateu exato sem E3 disparar).
     return est, regras
+
+
+# LIMITAÇÃO CONHECIDA (não resolvida, testada e documentada p/ não repetir):
+# em uma fração dos casos "item_returned"/culpa_vendedor, o ML acaba
+# compensando o vendedor integralmente (tarifa de venda + tarifa de devolução
+# estornadas via seção 'Cancelamentos' da página) — decisão aparentemente
+# discricionária do mediador. Testado: claim.stage NÃO discrimina (distribuição
+# idêntica — 14 dispute/1 recontact — entre os que o ML cobriu e os que o
+# vendedor pagou, n=15 cada, validado contra o livro-razão de faturamento).
+# Campos de claim/return já explorados sem sinal: status, resolution.reason,
+# resolution.benefited, applied_coverage, players. Pode não estar exposto na
+# API pública — só na página (daí o RPA continuar necessário como
+# complemento, não substituível 100% pelo motor).
 
 
 def calcular(order_id: int) -> dict | None:
@@ -138,6 +191,12 @@ def calcular(order_id: int) -> dict | None:
     pay          = _best_payment(o.get("payments") or [])
     reembolso    = float(pay.get("transaction_amount_refunded") or 0)
     proc         = _processo(o)
+    # E6: ML cobriu com decisão a favor do VENDEDOR (respondent) → o reembolso
+    # ao comprador saiu do bolso do ML, não do caixa do vendedor
+    # (QA ciclo 7: coverage_decision/no_bpp + ben=respondent, deltas −375…−575)
+    if proc.get("ml_cobriu") and proc.get("beneficiado") == "respondent":
+        reembolso = 0.0
+        proc["obs"] = "reembolso coberto pelo ML (E6)"
 
     frete_ida = _frete_ida((o.get("shipping") or {}).get("id"))
     if frete_ida is None:
@@ -149,7 +208,16 @@ def calcular(order_id: int) -> dict | None:
     #    ML cobre; nada de tarifa de devolução e o frete de ida é estornado
     #    (QA: página zera 29/29; doc: "será grátis e não afetará sua reputação")
     motivo = str(proc.get("motivo") or "")
-    ARREPENDIMENTO = {"PDD9939", "PDD9938", "PDD9952", "PDD9955"}  # família 'se arrependeu/não serve'
+    # rótulos REAIS confirmados via ml_devolucoes.reason_label (não suposição):
+    #   PDD9939 = "O comprador se arrependeu"           → grátis pro vendedor
+    #   PDD9941 = "Produto diferente do anúncio"         → DEFEITO, culpa vendedor
+    #   PDD9942 = "Produto danificado"                   → DEFEITO, culpa vendedor
+    #   PDD9943 = "Produto com defeito"                  → DEFEITO, culpa vendedor
+    #   PDD9944 = "Produto incompleto"                   → DEFEITO, culpa vendedor
+    #   PDD9949 = "Produto não funciona"                 → DEFEITO, culpa vendedor
+    # (QA ciclo 9→10 provou: incluir 9941/9944/9950 aqui sem evidência quebrava
+    #  o motor de 59,5%→26%; só entra no grátis o que está CONFIRMADO por label)
+    ARREPENDIMENTO = {"PDD9939"}
     proc["culpa_vendedor"] = motivo not in ARREPENDIMENTO
     cobra_dev = (proc["devolucao_fisica"]
                  and proc.get("beneficiado") == "complainant"
@@ -160,6 +228,16 @@ def calcular(order_id: int) -> dict | None:
     estornos, regras = _estornos(tarifa_venda, frete_ida, tarifa_dev, reembolso, proc)
     envios = frete_ida + tarifa_dev
     cancel_liq = reembolso - estornos
+
+    # EXPERIMENTO REVERTIDO (QA ciclo 9): usar o livro-razão de faturamento
+    # como override derrubou a acurácia de 59,5% → 26,0%. Achado de engenharia
+    # confirmado: o livro-razão mensal (fecha ~dia 17 do mês seguinte, pode
+    # reverter tarifas dias/semanas depois) representa um MOMENTO DIFERENTE
+    # do que a página em tempo real (nossa fonte validada 184/184 contra o
+    # que o usuário vê agora). Não são a mesma verdade — são dois snapshots
+    # temporais distintos do mesmo pedido. _fat_ledger() fica disponível para
+    # reconciliação agregada (mensal, ver reports/spec_regras_meli.md), não
+    # para override por pedido.
     saldo = round(produto - tarifa_venda - envios - cancel_liq, 2)
 
     return {
