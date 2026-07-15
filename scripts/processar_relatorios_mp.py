@@ -396,6 +396,11 @@ def _build_html_dashboard(
     _CANCEL_RE = r"(?i)^(cancelada|pacote cancelado|venda cancelada|você cancelou)"
     _estado = df_port_u.get("estado", pd.Series("", index=df_port_u.index)).astype(str)
     df_cancel_real = df_port_u[_estado.str.match(_CANCEL_RE, na=False)].copy()
+    # UM PEDIDO, UM CARD: cancelado que teve DISPUTA (claim) mora no card do
+    # resultado da disputa (Impacto) — sai do card Cancelamentos, que fica só
+    # com "venda não realizada" pura (sem reclamação/devolução envolvida)
+    _ids_disputa = set(df_dev["order_id"].astype(str))
+    df_cancel_real = df_cancel_real[~df_cancel_real["order_id"].astype(str).isin(_ids_disputa)]
     df_cancel_real["valor_reemb"] = df_cancel_real["cancelamentos_reembolsos_brl"].clip(upper=0).abs()
     df_cancel_real["resid"]       = df_cancel_real["total_brl"]
     df_cancel_real["anom"]        = (df_cancel_real["resid"].abs() > 0.10).astype(int)
@@ -509,6 +514,23 @@ def _build_html_dashboard(
         meli_map = {}
     if meli_map:
         print(f"  ✓ {len(meli_map):,} saldos coletados da página do Meli (fonte primária)")
+
+    # Estimativas do motor v2 (API pura, ~65-67% de acurácia medida em QA) —
+    # SÓ preenchem pedidos sem saldo confirmado ('em conciliação'). Nunca
+    # somadas aos KPIs/totais oficiais; exibidas com rótulo "estimativa".
+    estim_map: dict[str, dict] = {}
+    try:
+        _ec = get_db_connection()
+        df_estim = pd.read_sql(
+            "SELECT order_id::text AS oid, saldo_estimado::float AS saldo, regras, "
+            "to_char(calculado_em AT TIME ZONE 'America/Sao_Paulo','DD/MM/YY HH24:MI') AS em "
+            "FROM motor_estimativas", _ec)
+        estim_map = {str(r["oid"]): r.to_dict() for _, r in df_estim.iterrows()}
+        _ec.close()
+    except Exception:
+        estim_map = {}
+    if estim_map:
+        print(f"  ✓ {len(estim_map):,} estimativas do motor v2 (pedidos sem saldo confirmado)")
 
     def _oid_str(v) -> str:
         """Normaliza id de pedido para string inteira ('…136', nunca '…136.0')."""
@@ -659,9 +681,17 @@ def _build_html_dashboard(
         r["tip"] = _tip_venda(r.get("order_id"))
         if fonte != "meli" and str(r.get("dia","")) >= "2026-04-01":
             # disputa recente sem saldo confirmado na plataforma → não afirmar
+            # o número oficial, mas mostra a ESTIMATIVA do motor se existir
             r["saldo_final"] = None
             r["grupo"] = "conciliacao"
-            r["situacao"], r["classe"] = "🔄 Em conciliação — saldo sendo confirmado na plataforma", "warn"
+            ev = estim_map.get(_oid_str(r.get("order_id")))
+            if ev is not None:
+                r["saldo_estimado"] = round(float(ev["saldo"]), 2)
+                r["situacao"] = f"🔄 Em conciliação — estimativa do motor: R$ {ev['saldo']:,.2f} (não confirmado)"
+            else:
+                r["saldo_estimado"] = None
+                r["situacao"] = "🔄 Em conciliação — saldo sendo confirmado na plataforma"
+            r["classe"] = "warn"
             continue
         if saldo is None:
             saldo = float(r.get("total_brl") or 0)
@@ -748,12 +778,16 @@ def _build_html_dashboard(
             r["classe"], r["situacao"] = "", "✔ Cancelado sem movimentação"
         _estado(r, "order_id")
 
-    # REVERTIDOS: melhor caso — mas a situação final vem do saldo (frete pode
-    # ter ficado com o vendedor mesmo com o produto coberto)
+    # REVERTIDOS: semântica do card = "disputa que fechou SEM prejuízo"
+    # (zero ou positivo, confirmado). Pedido com saldo negativo (frete de
+    # devolução ficou com o vendedor) NÃO é revertido — é perda, e já
+    # aparece no card de Perda pelo grupo; aqui é EXCLUÍDO (fora=1).
+    # Não confirmado também sai (nunca afirmar "sem prejuízo" sem prova).
     for r in revert_modal:
         _estado(r, "order_id")
         r["tip"] = _tip_venda(r.get("order_id"))
-        _saldo_situacao(r, "order_id")  # marca 'em conciliação' quando não confirmado
+        saldo_rev = _saldo_situacao(r, "order_id")
+        r["fora"] = 1 if (saldo_rev is None or saldo_rev < -5) else 0
 
     # (daily_disp é calculado mais adiante, DEPOIS de carregar os saldos
     #  coletados da página do Meli — fonte primária do saldo final)
@@ -849,7 +883,7 @@ def _build_html_dashboard(
         _modal("cancelamentos","Cancelamentos — Pedidos Cancelados (fonte: base de pedidos ML)","'Saída do Caixa' = o que saiu líquido da sua conta (tarifas estornadas já abatidas). 'Devolvido ao Comprador' = valor bruto que o comprador recebeu de volta — por isso os dois diferem. Linha amarela = saldo residual não zerou (anomalia).",CH) +
         _modal("mediacao","Mediações Conciliadas — ML Cobriu","'Transação MP' = valor que o ML movimentou (produto). 'Saldo Final' = como a venda fechou PRA VOCÊ (igual ao Total no detalhe do Meli) — pode ficar negativo se o frete/tarifa de devolução ficou por sua conta.",MH) +
         _modal("nao_conciliado","Não Conciliados — Perda","O arquivo MP é um retrato no tempo. Linha verde = o estado VIVO na ML API mostra que o ML cobriu depois (não é mais perda). Linha vermelha = perda confirmada até agora.",MH) +
-        _modal("revertidos","Revertidos do Negativo — ML Cobriu Tudo","🟢 Melhor cenário: devolveram o produto, ML pagou a venda. Confira 'Saldo Final' — se negativo, o frete ficou com você.",VH)
+        _modal("revertidos","Revertidos do Negativo — Fecharam sem Prejuízo","🟢 Só pedidos de disputa que fecharam no ZERO ou POSITIVO (confirmado na plataforma). Quem fechou negativo está no card de Perda — cada pedido fica em um único card, conforme seu estado atual.",VH)
     )
 
     # ── HTML ──────────────────────────────────────────────────────────────────
@@ -917,6 +951,7 @@ dialog::backdrop{{background:rgba(0,0,0,.45)}}
 .dlg-body tr.row-ok:hover td{{background:#E6FFEE!important}}
 .dlg-body td.neg{{color:#C0392B;font-weight:600}}
 .dlg-body td.pos{{color:#1E8449;font-weight:600}}
+.dlg-body td.est{{color:#8395A7;font-style:italic;font-weight:400}}
 .brk-wrap{{padding:4px 22px 14px}}
 .brk{{background:#fff;border-radius:10px;padding:14px 18px;box-shadow:0 1px 3px rgba(0,0,0,.08);border:2px solid #DCE7F3}}
 .brk h3{{font-size:12.5px;color:#1F4E79;font-weight:700;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #EEE}}
@@ -958,7 +993,7 @@ dialog::backdrop{{background:rgba(0,0,0,.45)}}
 <!-- SEÇÃO 1: MOVIMENTO -->
 <div class="sec-hdr"><h2>📦 Movimento do Período</h2><hr></div>
 <div class="sec-note">
-  <b>Cancelamento</b> = pedido cancelado antes da entrega — nenhum produto enviado &nbsp;|&nbsp;
+  <b>Lente desta seção: EVENTOS do período</b> (um pedido pode ter mais de um evento) &nbsp;•&nbsp; <b>Cancelamento</b> = venda não realizada, SEM disputa envolvida &nbsp;|&nbsp;
   <b>Devolução</b> = produto entregue e devolvido; ML cobre automaticamente via BPP (Buyer Protection) &nbsp;|&nbsp;
   <b>Reclamação</b> = disputa formal; ML arbitra com base em fotos, rastreio e laudos
 </div>
@@ -983,7 +1018,7 @@ dialog::backdrop{{background:rgba(0,0,0,.45)}}
 
 <!-- SEÇÃO 2: IMPACTO FINANCEIRO -->
 <div class="sec-hdr"><h2>💰 Impacto Financeiro das Devoluções e Reclamações</h2><hr></div>
-<div class="sec-note">Mediações encerradas na base Neon (ml_devolucoes). Clique em qualquer card para detalhar.</div>
+<div class="sec-note"><b>Lente desta seção: ESTADO ATUAL consolidado</b> — cada pedido conta UMA única vez, no card do seu estado (e migra de card quando o estado muda na plataforma). Clique em qualquer card para detalhar.</div>
 <div class="cards">
   <div class="card c-hl" onclick="openM('reclamacoes')"><span class="badge">ver lista</span>
     <div class="lbl">Valor Total das Devoluções</div><div class="v cb" id="k-perda">{brl(kpi["perda_bruta"])}</div>
@@ -992,9 +1027,9 @@ dialog::backdrop{{background:rgba(0,0,0,.45)}}
     <div class="lbl">Fretes e Taxas de Devolução</div><div class="v cr" id="k-frete">−{brl(perda_frete)}</div>
     <div class="s">só dos pedidos que fecharam NEGATIVOS</div>
     <div class="def">Frete de venda que deu certo é custo de vender, não prejuízo</div></div>
-  <div class="card c-ok" onclick="openM('reclamacoes','revertida')"><span class="badge">ver lista</span>
+  <div class="card c-ok" onclick="openM('reclamacoes')"><span class="badge">ver lista</span>
     <div class="lbl">Recuperado pelo ML</div><div class="v cg" id="k-rec">+{brl(kpi["recuperado_ml"])}</div>
-    <div class="s">o que a ML reembolsou ao vendedor</div></div>
+    <div class="s">reembolsos do ML em todas as disputas do período</div></div>
   <div class="card" style="border:2px solid #1F4E79" onclick="openM('reclamacoes')"><span class="badge">ver lista</span>
     <div class="lbl">% Recuperado</div><div class="v" style="color:{pct_color};font-size:24px" id="k-pct">{kpi["pct_recuperado"]:.1f}%</div>
     <div class="s">cobertura média da ML sobre as perdas</div></div>
@@ -1008,7 +1043,7 @@ dialog::backdrop{{background:rgba(0,0,0,.45)}}
     <div class="def">= produto não recuperado + fretes/taxas de devolução</div></div>
   <div class="card c-ok" onclick="openM('revertidos')"><span class="badge">ver lista</span>
     <div class="lbl">Revertidos do Negativo</div><div class="v cg" id="k-rev">{len(df_revert):,}</div>
-    <div class="s">ML cobriu ≥ 90% — saiu no zero</div>
+    <div class="s">disputas que fecharam no zero ou positivo</div>
     <div class="def">Devolução onde você não saiu no prejuízo</div></div>
 </div>
 
@@ -1085,7 +1120,7 @@ function calc(){{
     dev_c:sum(dl,'count'),dev_v:sum(dl,'valor'),
     rec_c:sum(rc,'count'),rec_v:sum(rc,'valor'),
     perda:p,recup:r,taxa:t,liq:l,mant:mt,pct:p>0?r/p*100:0,
-    rev:D.revert_modal.filter(r=>inR(r.dia)).length,
+    rev:D.revert_modal.filter(r=>inR(r.dia)&&!r.fora).length,
     bpp_c:sum(dl,'count'),bpp_v:sum(dl,'valor'),
     med_c:D.mediacao_modal.filter(r=>inR(r.dia)).length,
     med_v:D.mediacao_modal.filter(r=>inR(r.dia)).reduce((s,r)=>s+(r.mp_valor_f||0),0),
@@ -1154,7 +1189,7 @@ function setR(days){{
 // tipos de célula: 0=texto | 1=número neutro | 2=prejuízo (−, vermelho) | 3=positivo (+, verde)
 // 4=saldo (cor pelo sinal: verde se sobrou, vermelho se ficou negativo)
 const COLS={{
-  reclamacoes:    [['Nº Pedido','order_id',0],['Data','dia',0],['Produto','sku',0],['Motivo da Reclamação','motivo_ml',0],['Val. Original R$','perda_bruta',1],['Recuperado ML R$','recuperado_ml',3],['Taxa ML R$','taxa_ml_retida',2],['Perda Real R$','perda_liquida',2],['Saldo Final R$','saldo_final',4],['Situação','situacao',0],['Estado Atual ML','estado_api',0],['Validado em','api_em',0]],
+  reclamacoes:    [['Nº Pedido','order_id',0],['Data','dia',0],['Produto','sku',0],['Motivo da Reclamação','motivo_ml',0],['Val. Original R$','perda_bruta',1],['Recuperado ML R$','recuperado_ml',3],['Taxa ML R$','taxa_ml_retida',2],['Perda Real R$','perda_liquida',2],['Saldo Final R$','saldo_final',5],['Situação','situacao',0],['Estado Atual ML','estado_api',0],['Validado em','api_em',0]],
   devolucoes:     [['Nº Pedido','mp_order_id',0],['Data','dia',0],['Tipo de Resolução','status_detail',0],['Transação MP R$','mp_valor_f',1],['Saldo Final R$','saldo_final',4],['Situação','situacao',0],['Estado Atual ML','estado_api',0],['Validado em','api_em',0]],
   cancelamentos:  [['Nº Pedido','order_id',0],['Data','dia',0],['Quem Cancelou','tipo',0],['Motivo','motivo',0],['Saída do Caixa R$','valor_reemb',2],['Devolvido ao Comprador R$','devolvido_bruto',2],['Saldo Residual R$','resid',4],['⚠ Situação','situacao',0],['Estado Atual ML','estado_api',0],['Validado em','api_em',0]],
   mediacao:       [['Nº Pedido','mp_order_id',0],['Data','dia',0],['Tipo de Resolução','status_detail',0],['Transação MP R$','mp_valor_f',1],['Saldo Final R$','saldo_final',4],['Situação','situacao',0],['Estado Atual ML','estado_api',0],['Validado em','api_em',0]],
@@ -1172,6 +1207,9 @@ function buildT(id){{
   // recorte semântico: o card de perda mostra SÓ perdas, o de recuperado só revertidas…
   const g=GRUPO[id];
   if(g)rows=rows.filter(r=>g==='perda'?(r.grupo==='perda'||r.grupo==='parcial'):r.grupo===g);
+  // Revertidos = SÓ quem fechou sem prejuízo (zero/positivo, confirmado);
+  // saldo negativo pertence ao card de Perda, não aqui
+  if(id==='revertidos')rows=rows.filter(r=>!r.fora);
   const cols=COLS[id]||COLS.reclamacoes;
   const cnt=document.getElementById('cnt-'+id);if(cnt)cnt.textContent=rows.length.toLocaleString('pt-BR');
   tb.innerHTML='';
@@ -1203,6 +1241,17 @@ function buildT(id){{
         else{{const x=Number(v);const a=Math.abs(x);
           td.textContent=a<0.005?'0,00':((x>0?'+':'−')+a.toLocaleString('pt-BR',{{minimumFractionDigits:2}}));
           td.className='num'+(a<0.005?'':(x>0?' pos':' neg'));}}
+      }}
+      else if(t===5){{
+        // saldo confirmado (número normal) OU estimativa do motor (itálico,
+        // cinza, sufixo '(estim.)') — nunca confundir os dois visualmente
+        if(v!=null){{const x=Number(v);const a=Math.abs(x);
+          td.textContent=a<0.005?'0,00':((x>0?'+':'−')+a.toLocaleString('pt-BR',{{minimumFractionDigits:2}}));
+          td.className='num'+(a<0.005?'':(x>0?' pos':' neg'));}}
+        else if(r.saldo_estimado!=null){{const x=Number(r.saldo_estimado);const a=Math.abs(x);
+          td.textContent=((x>0?'+':'−')+a.toLocaleString('pt-BR',{{minimumFractionDigits:2}})+' (estim.)');
+          td.className='num est';td.title='Estimativa do motor automático — NÃO confirmado na plataforma (~65-67% de acurácia medida)';}}
+        else{{td.textContent='—';td.className='num';}}
       }}
       else{{
         td.textContent=v!=null?String(v):'—';

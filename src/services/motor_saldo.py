@@ -178,6 +178,13 @@ def _estornos(tarifa_venda: float, frete_ida: float, tarifa_dev: float,
 # resolution.benefited, applied_coverage, players. Pode não estar exposto na
 # API pública — só na página (daí o RPA continuar necessário como
 # complemento, não substituível 100% pelo motor).
+#
+# 2ª LIMITAÇÃO: cancelamentos SEM claim formal (mediations=[]) com pagamento
+# status_detail='bpp_covered' às vezes pagam ao vendedor mais que o simples
+# estorno zerado (compensação BPP). Testado reembolso−tarifa_venda em 4
+# casos: bateu em 1/3 amostras (2000017304415096), não em 2 — não é fórmula
+# fixa, parece calculado caso a caso pelo ML (talvez incluindo compensação
+# de reputação/atraso). Não implementado — resíduo conhecido, ~1-2% do corpus.
 
 
 def calcular(order_id: int) -> dict | None:
@@ -225,7 +232,22 @@ def calcular(order_id: int) -> dict | None:
                  and proc["culpa_vendedor"])
     tarifa_dev = 2.0 * frete_ida if cobra_dev else 0.0
 
-    estornos, regras = _estornos(tarifa_venda, frete_ida, tarifa_dev, reembolso, proc)
+    # E7: cancelamento SEM claim formal (mediations=[]) com pagamento
+    # status_detail EXATAMENTE 'bpp_covered' → Proteção ML cobriu/absorveu o
+    # custo de um fundo separado, NÃO deduz do caixa do vendedor. Vendedor
+    # mantém produto, paga tarifa de venda e frete normalmente (como venda
+    # comum). Evidência: 12/12 casos validados eram 'bpp_covered' (nunca
+    # 'bpp_refunded' — esse é DIFERENTE: dinheiro sai do vendedor, zera
+    # normal). 1ª versão incluía 'bpp_refunded' por engano e regrediu o
+    # cluster 'cancelamento/Recebimento devolvido' de 87,7%→34,1% — corrigido
+    # após diagnosticar via substatus do shipment (bpp_refunded='returned_to_
+    # warehouse', bpp_covered='damaged'/outras falhas sem devolução física).
+    eh_bpp_sem_claim = (proc["tipo"] == "cancelamento" and not o.get("mediations")
+                        and str(pay.get("status_detail") or "") == "bpp_covered")
+    if eh_bpp_sem_claim:
+        estornos, regras = reembolso, ["E7_bpp_covered_sem_claim"]
+    else:
+        estornos, regras = _estornos(tarifa_venda, frete_ida, tarifa_dev, reembolso, proc)
     envios = frete_ida + tarifa_dev
     cancel_liq = reembolso - estornos
 

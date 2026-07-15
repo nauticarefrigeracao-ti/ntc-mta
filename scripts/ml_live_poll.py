@@ -64,6 +64,18 @@ def run_cycle(output_dir: Path, janela_dias: int, ttl_min: int, workers: int) ->
         )
     except Exception as exc:
         print(f"  ⚠ coleta de saldos falhou (segue): {type(exc).__name__}: {exc}")
+
+    # 1c. estimativas do motor v2 (API pura) para pedidos ainda sem saldo
+    # confirmado — NUNCA substitui o saldo coletado, só preenche o "em
+    # conciliação" com uma estimativa rotulada enquanto a coleta não chega lá
+    try:
+        subprocess.run(
+            [sys.executable, "-u", str(ROOT / "scripts" / "estimar_conciliacao.py"),
+             "--max", "150", "--workers", "4"],
+            timeout=600, check=False,
+        )
+    except Exception as exc:
+        print(f"  ⚠ estimativa do motor falhou (segue): {type(exc).__name__}: {exc}")
     conn = get_db_connection()
     try:
         rel._ensure_validation_table(conn)
