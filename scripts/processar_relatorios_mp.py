@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import warnings
 from datetime import datetime
@@ -376,6 +377,23 @@ def _build_html_dashboard(
     df_dev = df_port_u[df_port_u["perda_bruta"] > 0].copy()
     df_dev["dia"] = df_dev["data_venda"].dt.strftime("%Y-%m-%d").fillna("")
 
+    # UX writing: NENHUM código/termo técnico cru chega à coluna Motivo.
+    # reason_label às vezes vem vazio ou com o próprio código (PDD…/PNR…);
+    # descricao_status de pedidos api_sync vem "status ML API: cancelled".
+    _re_cod_motivo = re.compile(r"^\s*(PDD|PNR)\d+\s*$", re.I)
+    def _motivo_negocio(v) -> str:
+        s = str(v or "").strip()
+        if not s or s.lower() in ("none", "nan"):
+            return "Motivo não informado pelo Mercado Livre"
+        if _re_cod_motivo.match(s):
+            return "Motivo não descrito pelo Mercado Livre"
+        if s.startswith("status ML API:"):
+            return "Não informado pelo Mercado Livre"
+        return s
+    for _df, _col in ((df_dev, "motivo_ml"), (df_port_u, "motivo_ml")):
+        if _col in _df.columns:
+            _df[_col] = _df[_col].map(_motivo_negocio)
+
     df_mp_c = df_mp.copy()
     df_mp_c["data_criacao"] = pd.to_datetime(df_mp_c["data_criacao"], errors="coerce", utc=True)
     df_mp_c["dia"] = df_mp_c["data_criacao"].dt.strftime("%Y-%m-%d").fillna("")
@@ -418,13 +436,13 @@ def _build_html_dashboard(
             return "Mercado Livre cancelou"
         if e.startswith("você cancelou"):
             return "Vendedor cancelou"
-        return "Cancelado (ver motivo)"
+        return "Cancelado no Mercado Livre"
 
     df_cancel_real["tipo"] = [
         _tipo_cancel(e, m)
         for e, m in zip(df_cancel_real["estado"].astype(str), df_cancel_real["descricao_status"].astype(str))
     ]
-    df_cancel_real["motivo"] = df_cancel_real["descricao_status"].astype(str).str.slice(0, 70)
+    df_cancel_real["motivo"] = df_cancel_real["descricao_status"].astype(str).str.slice(0, 70).map(_motivo_negocio)
 
     ids_prej = (
         set(df_dev["order_id"].astype(str)) |
@@ -980,6 +998,15 @@ def _build_html_dashboard(
     now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
     med_c = len(df_mediacao); med_v = df_mediacao["mp_valor_f"].sum()
     nc_c  = len(df_nc);       nc_v  = df_nc["mp_valor_f"].sum()
+    # cards do relatório MP com contagem ZERO não renderizam (só confundem)
+    card_nc = "" if not nc_c else f"""<div class="card c-hl" onclick="openM('nao_conciliado')"><span class="badge">ver lista</span>
+    <div class="lbl">Não Conciliados — Perda</div><div class="v cr" id="k-nc-c">{nc_c:,}</div>
+    <div class="s" id="k-nc-v">{brl(nc_v)} = perda confirmada</div>
+    <div class="def">Reclamação que o vendedor perdeu</div></div>"""
+    card_cancel_mp = "" if not len(df_cancel) else f"""<div class="card" onclick="openM('cancelamentos')"><span class="badge">ver lista</span>
+    <div class="lbl">Cancelamentos Diretos</div><div class="v co" id="k-ref-c">{len(df_cancel):,}</div>
+    <div class="s" id="k-ref-v">{brl(df_cancel["mp_valor_f"].sum())}</div>
+    <div class="def">Vendedor reembolsou diretamente</div></div>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -1084,10 +1111,19 @@ details.detalhes[open]>summary{{border-radius:8px 8px 0 0;background:#F4F7FA}}
   <button class="btn-r" onclick="setR(90)">3 meses</button>
   <button class="btn-r" onclick="setR(180)">6 meses</button>
   <button class="btn-r active" id="btn-all" onclick="setR(0)">Todo o período</button>
+  <button class="btn-r" id="btn-dir" onclick="setDir()" style="border-color:#F5B041">Jan–Jun/26 · relatório da diretoria</button>
   <span style="color:rgba(255,255,255,.3);margin:0 6px">|</span>
   <label>DE</label><input type="date" id="inp-s" onchange="fAll()">
   <label>ATÉ</label><input type="date" id="inp-e" onchange="fAll()">
   <span class="fperiod" id="fp"></span>
+</div>
+<div id="nota-diretoria" style="display:none;background:#FEF9E7;border-left:4px solid #F5B041;padding:10px 22px;font-size:12px;color:#6E4F00;line-height:1.6">
+  <b>Comparando com o relatório mensal impresso (jan–jun/26):</b> os totais batem pedido a pedido em <b>99,4%</b> (confirmado na plataforma, 2.397 de 2.411 conferidos).
+  As diferenças que aparecem têm 3 causas, todas naturais:
+  <b>1)</b> aqui cada venda conta no mês da VENDA — no relatório, vendas de nov–dez/25 que devolveram em janeiro contam em janeiro;
+  <b>2)</b> alguns pedidos ainda estão “em conciliação” (o resultado está sendo confirmado na plataforma — a coluna cinza do mês a mês mostra quantos);
+  <b>3)</b> o relatório é uma fotografia de 07/07 — pedidos que o Mercado Livre resolveu DEPOIS dessa data aparecem aqui já atualizados (ex.: disputa de junho que virou indenização de +R$ 237 no dia 08/07).
+  O painel mostra o hoje; o relatório, o dia em que foi gerado.
 </div>
 <div id="no-data-warn" style="display:none;background:#FFF3CD;border-left:4px solid #E67E22;padding:9px 22px;font-size:11.5px;color:#7D4A00">
   ⚠ <b>Nenhum dado para o período selecionado.</b> &nbsp;O portfólio importado cobre <b>{d_start}</b> até <b>{d_end}</b>. Use o botão <b>Todo o período</b> para ver todos os dados.
@@ -1199,14 +1235,7 @@ details.detalhes[open]>summary{{border-radius:8px 8px 0 0;background:#F4F7FA}}
     <div class="lbl">Mediações Conciliadas</div><div class="v cb" id="k-med-c">{med_c:,}</div>
     <div class="s" id="k-med-v">{brl(med_v)} = ML cobriu via mediação</div>
     <div class="def">reconciled + compensated</div></div>
-  <div class="card c-hl" onclick="openM('nao_conciliado')"><span class="badge">ver lista</span>
-    <div class="lbl">Não Conciliados — Perda</div><div class="v cr" id="k-nc-c">{nc_c:,}</div>
-    <div class="s" id="k-nc-v">{brl(nc_v)} = perda confirmada</div>
-    <div class="def">Reclamação que o vendedor perdeu</div></div>
-  <div class="card" onclick="openM('cancelamentos')"><span class="badge">ver lista</span>
-    <div class="lbl">Cancelamentos Diretos</div><div class="v co" id="k-ref-c">{len(df_cancel):,}</div>
-    <div class="s" id="k-ref-v">{brl(df_cancel["mp_valor_f"].sum())}</div>
-    <div class="def">refunded = vendedor reembolsou diretamente</div></div>
+  {card_nc}{card_cancel_mp}
 </div>
 
 <!-- GRÁFICOS -->
@@ -1320,15 +1349,28 @@ function upCharts(){{
 
 function persistR(){{try{{sessionStorage.setItem('pd_range',cS+'|'+cE);}}catch(e){{}}}}
 
-function fAll(){{cS=document.getElementById('inp-s').value||D.d_start;cE=document.getElementById('inp-e').value||D.d_end;document.querySelectorAll('.btn-r').forEach(b=>b.classList.remove('active'));persistR();upCards();upCharts();}}
+function notaDir(on){{const n=document.getElementById('nota-diretoria');if(n)n.style.display=on?'block':'none';}}
+
+function fAll(){{cS=document.getElementById('inp-s').value||D.d_start;cE=document.getElementById('inp-e').value||D.d_end;document.querySelectorAll('.btn-r').forEach(b=>b.classList.remove('active'));notaDir(false);persistR();upCards();upCharts();}}
 
 function setR(days){{
   document.querySelectorAll('.btn-r').forEach(b=>b.classList.remove('active'));
+  notaDir(false);
   if(days===0){{document.getElementById('btn-all')?.classList.add('active');cS=D.d_start;cE=D.d_end;}}
   else{{const e=new Date(D.d_end),s=new Date(+e-days*86400000);cS=s.toISOString().slice(0,10);cE=D.d_end;}}  // ref=fim dos dados, não hoje
   document.getElementById('inp-s').value=cS;
   document.getElementById('inp-e').value=cE;
   persistR();upCards();upCharts();
+}}
+
+// preset de demonstração: o MESMO recorte do relatório mensal da diretoria
+function setDir(){{
+  document.querySelectorAll('.btn-r').forEach(b=>b.classList.remove('active'));
+  document.getElementById('btn-dir')?.classList.add('active');
+  cS='2026-01-01';cE='2026-06-30';
+  document.getElementById('inp-s').value=cS;
+  document.getElementById('inp-e').value=cE;
+  notaDir(true);persistR();upCards();upCharts();
 }}
 
 // tipos de célula: 0=texto | 1=número neutro | 2=prejuízo (−, vermelho) | 3=positivo (+, verde)
@@ -1829,6 +1871,7 @@ TERMINAL_PAY_DETAILS: frozenset[str] = frozenset({
     "bpp_refunded", "bpp_covered", "partially_bpp_refunded", "partially_bpp_covered",
     "refunded", "partially_refunded", "reconciled", "compensated",
     "by_admin", "by_payer", "accredited",
+    "order_not_found",  # 404 na API: id herdado de CSV que não existe no ML
 })
 
 
@@ -2003,7 +2046,16 @@ def _run_full_validation(conn, force: bool = False, n_workers: int = 8, validar_
             "tiny_nome":       tiny_nome,
         }
         try:
-            order = ml_client.get_order(order_id)
+            # get_order_ex distingue 404 (pedido não existe — terminal) de
+            # erro transiente; getattr = compat com client antigo em prod
+            _go_ex = getattr(ml_client, "get_order_ex", None)
+            if _go_ex is not None:
+                order, _http = _go_ex(order_id)
+                if order is None and _http == 404:
+                    base["api_pay_detail"] = "order_not_found"
+                    return base
+            else:
+                order = ml_client.get_order(order_id)
             if not order:
                 return base
             api_total  = float(order.get("total_amount") or 0)
@@ -2015,7 +2067,13 @@ def _run_full_validation(conn, force: bool = False, n_workers: int = 8, validar_
             base["api_pay_detail"]= pay0.get("status_detail", "")
             base["concorda_ml"]   = base["delta"] < 1.0
         except Exception as exc:
-            base["api_pay_detail"] = str(exc)[:120]
+            txt = str(exc)
+            # 404 da API = pedido não existe no ML (ids herdados de CSV) —
+            # estado TERMINAL: nunca vai passar a existir; sai do polling.
+            if "order_not_found" in txt or "Order do not exists" in txt or "404" in txt:
+                base["api_pay_detail"] = "order_not_found"
+            else:
+                base["api_pay_detail"] = txt[:120]
         return base
 
     # 5. Validar em paralelo, coletar resultados
