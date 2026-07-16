@@ -100,6 +100,18 @@ def run_cycle(output_dir: Path, janela_dias: int, ttl_min: int, workers: int) ->
         "validacao": {k: v for k, v in validation.items() if k != "detalhes"},
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # gate de regressão SEMÂNTICA: valida as invariantes de negócio do painel
+    # gerado (um-pedido-um-card, grupos×saldo, anomalias, UX sem código cru…)
+    try:
+        import subprocess
+        r = subprocess.run(
+            [sys.executable, "-u", str(ROOT / "scripts" / "qa_semantica_painel.py"), str(html_out)],
+            capture_output=True, text=True, timeout=120)
+        ultima = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
+        print(f"  {'✓' if r.returncode == 0 else '✗ REGRESSÃO SEMÂNTICA'} QA semântico: {ultima}")
+    except Exception as exc:
+        print(f"  ⚠ QA semântico falhou ao rodar: {type(exc).__name__}: {exc}")
+
     dt = time.monotonic() - t0
     print(f"  ✓ ciclo completo em {dt:,.0f}s — paridade ML API {validation['pct_paridade']}% "
           f"({validation['novos']:,} revalidados agora)")

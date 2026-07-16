@@ -50,13 +50,18 @@ def _seller_id() -> str:
     return str(me["id"])
 
 
-def _iter_orders(seller: str, date_from: str):
-    """Pagina /orders/search da mais recente para trás, filtrando por data."""
+def _iter_orders(seller: str, date_from: str, date_to: str | None = None):
+    """Pagina /orders/search da mais recente para trás, filtrando por data.
+
+    A ML capa o offset em 10.000 — para janelas com mais pedidos que isso,
+    fatiar por mês via date_to (sync_orders(date_from, date_to=...)).
+    """
     offset, limit = 0, 50
+    ate = f"&order.date_created.to={date_to}T23:59:59.999-03:00" if date_to else ""
     while True:
         page = ml_client._get(
             f"/orders/search?seller={seller}&order.date_created.from={date_from}T00:00:00.000-03:00"
-            f"&sort=date_desc&offset={offset}&limit={limit}"
+            f"{ate}&sort=date_desc&offset={offset}&limit={limit}"
         )
         if not page:
             return
@@ -70,7 +75,7 @@ def _iter_orders(seller: str, date_from: str):
             return
 
 
-def sync_orders(date_from: str, quiet: bool = False) -> dict:
+def sync_orders(date_from: str, quiet: bool = False, date_to: str | None = None) -> dict:
     from psycopg2.extras import execute_values
 
     seller = _seller_id()
@@ -125,7 +130,7 @@ def sync_orders(date_from: str, quiet: bool = False) -> dict:
             conn.commit()
             buf_ord, buf_it = [], []
 
-        for o in _iter_orders(seller, date_from):
+        for o in _iter_orders(seller, date_from, date_to):
             oid = str(o.get("id") or "")
             if not oid:
                 continue

@@ -182,10 +182,14 @@ def main() -> None:
     ap.add_argument("--ate", default="2026-05-31")
     ap.add_argument("--max", type=int, default=500)
     ap.add_argument("--ids", nargs="*", type=int, help="ids específicos (ignora período)")
+    ap.add_argument("--ids-file", dest="ids_file", help="arquivo com um id por linha (ignora período)")
     ap.add_argument("--recolher", action="store_true", help="recoleta mesmo os já coletados")
     args = ap.parse_args()
 
-    ids = args.ids or selecionar_ids(args.de, args.ate, args.max, recolher=args.recolher)
+    ids = args.ids or []
+    if args.ids_file:
+        ids += [int(l) for l in Path(args.ids_file).read_text(encoding="utf-8").split() if l.strip().isdigit()]
+    ids = ids or selecionar_ids(args.de, args.ate, args.max, recolher=args.recolher)
     print(f"{len(ids):,} pedidos a coletar ({args.de} → {args.ate})", flush=True)
     if not ids:
         print("nada a coletar — tudo já tem saldo fresco (<20h)")
