@@ -72,7 +72,7 @@ def run_cycle(output_dir: Path, janela_dias: int, ttl_min: int, workers: int) ->
         subprocess.run(
             [sys.executable, "-u", str(ROOT / "scripts" / "estimar_conciliacao.py"),
              "--max", "150", "--workers", "4"],
-            timeout=600, check=False,
+            timeout=1200, check=False,
         )
     except Exception as exc:
         print(f"  ⚠ estimativa do motor falhou (segue): {type(exc).__name__}: {exc}")
@@ -106,7 +106,7 @@ def run_cycle(output_dir: Path, janela_dias: int, ttl_min: int, workers: int) ->
         import subprocess
         r = subprocess.run(
             [sys.executable, "-u", str(ROOT / "scripts" / "qa_semantica_painel.py"), str(html_out)],
-            capture_output=True, text=True, timeout=120)
+            capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace")
         ultima = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
         print(f"  {'✓' if r.returncode == 0 else '✗ REGRESSÃO SEMÂNTICA'} QA semântico: {ultima}")
     except Exception as exc:
@@ -116,7 +116,7 @@ def run_cycle(output_dir: Path, janela_dias: int, ttl_min: int, workers: int) ->
     # e inofensivo enquanto o arquivo do webhook não existir
     try:
         r = subprocess.run([sys.executable, "-u", str(ROOT / "scripts" / "slack_notify.py"), "--once"],
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace")
         ult = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
         if ult and "nada a fazer" not in ult:
             print(f"  {ult}")
