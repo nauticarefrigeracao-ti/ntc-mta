@@ -115,6 +115,13 @@ def prazo_estimado(row: Mapping[str, Any], agora: Optional[datetime] = None) -> 
         criada = row.get("date_created")
         if not criada:
             return "⏰ *Prazo estimado*: ~2 dias corridos para responder (data de abertura não disponível)"
+        if isinstance(criada, str):
+            try:
+                criada = datetime.fromisoformat(criada.replace("Z", "+00:00"))
+            except ValueError:
+                return "⏰ *Prazo estimado*: ~2 dias corridos para responder (data de abertura inválida)"
+        if criada.tzinfo is None:
+            criada = criada.replace(tzinfo=timezone.utc)
         limite = criada + timedelta(days=2)
         restante = limite - agora
         horas = int(restante.total_seconds() // 3600)
@@ -163,7 +170,8 @@ def chave_estado(row: Mapping[str, Any]) -> str:
     Usamos "status:stage" como valor de 'status' -- uma mudanca de etapa
     (ex.: claim -> dispute) ja gera uma chave nova e dispara nova notificacao.
     """
-    return f"{row.get('claim_status')}:{row.get('claim_stage')}"
+    tracking = row.get("return_tracking_status") or row.get("return_status") or ""
+    return f"{row.get('claim_status')}:{row.get('claim_stage')}:{tracking}"
 
 
 def deve_notificar(chaves_anteriores: set[str], chave_atual: str) -> bool:
