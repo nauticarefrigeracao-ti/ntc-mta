@@ -66,6 +66,9 @@ _TRACKING_LABELS = {
     "not_delivered": "Não entregue",
 }
 
+REMINDER_INTERVAL_HORAS = 4  # intervalo minimo entre lembretes de reclamacao/recontato ainda sem resposta
+ESTAGIOS_COM_LEMBRETE = {"claim", "recontact"}
+
 
 def categorizar(row: Mapping[str, Any]) -> str:
     """Classifica o processo em uma categoria clara para o SAC.
@@ -184,6 +187,44 @@ def eh_atualizacao(chaves_anteriores: set[str]) -> bool:
     (ou seja, esta nova mensagem e uma ATUALIZAÇÃO DE ESTADO, nao a primeira)."""
     return len(chaves_anteriores) > 0
 
+def precisa_lembrete(row: Mapping[str, Any], ultimo_aviso: Optional[datetime],
+                      agora: Optional[datetime] = None) -> bool:
+    """True se o processo ainda exige resposta do vendedor (reclamacao direta
+    ou recontato, em aberto) e ja passou tempo suficiente desde o ultimo aviso
+    no Slack -- para insistir ate a resposta ser dada, evitando penalizacao
+    de reputacao por demora no atendimento."""
+    if row.get("claim_status") != "opened":
+        return False
+    if row.get("claim_stage") not in ESTAGIOS_COM_LEMBRETE:
+        return False
+    if ultimo_aviso is None:
+        return False
+    agora = agora or datetime.now(timezone.utc)
+    if ultimo_aviso.tzinfo is None:
+        ultimo_aviso = ultimo_aviso.replace(tzinfo=timezone.utc)
+    return (agora - ultimo_aviso) >= timedelta(hours=REMINDER_INTERVAL_HORAS)
+
+def montar_mensagem_lembrete(row: Mapping[str, Any], agora: Optional[datetime] = None) -> str:
+    """Mensagem de insistencia para reclamacao/recontato ainda sem resposta --
+    repete periodicamente ate o estado mudar (resposta dada pelo vendedor)."""
+    categoria = categorizar(row)
+    titulo = row.get("item_title") or "Produto"
+    sku = row.get("item_sku") or "—"
+    motivo = row.get("reason_label") or "nao informado"
+    oid = row.get("order_id")
+    linhas = [
+        f"*Ainda sem resposta* — {categoria}",
+        f"*{titulo}* (SKU {sku})",
+        f"Motivo: _{motivo}_",
+        "Isso ainda esta aguardando resposta do vendedor -- demora pode penalizar a reputacao no Mercado Livre.",
+    ]
+    prazo = prazo_estimado(row, agora)
+    if prazo:
+        linhas.append(prazo)
+    if oid:
+        linhas.append(f"<https://www.mercadolivre.com.br/vendas/{oid}/detalhe|Pedido {oid} - abrir a venda>")
+    return "\n".join(linhas)
+
 
 def montar_mensagem(row: Mapping[str, Any], saldo: Optional[float] = None,
                      atualizacao: bool = False, agora: Optional[datetime] = None) -> str:
@@ -259,6 +300,11 @@ def _chaves_anteriores(cur, claim_id) -> set[str]:
     cur.execute("SELECT status FROM slack_notificados WHERE claim_id = %s", (claim_id,))
     return {r[0] for r in cur.fetchall()}
 
+def _ultimo_aviso(cur, claim_id) -> Optional[datetime]:
+    cur.execute("SELECT MAX(avisado_em) FROM slack_notificados WHERE claim_id = %s", (claim_id,))
+    row = cur.fetchone()
+    return row[0] if row and row[0] is not None else None
+
 
 def notificar_processos() -> int:
     """Processos novos OU com mudanca de estado ainda nao avisados -> #sac."""
@@ -281,21 +327,32 @@ def notificar_processos() -> int:
                 LIMIT 50
             """)
             rows = cur.fetchall()
+        agora = datetime.now(timezone.utc)
         with conn.cursor() as cur:
             for row in rows:
                 anteriores = _chaves_anteriores(cur, row["claim_id"])
                 chave = chave_estado(row)
-                if not deve_notificar(anteriores, chave):
+                if deve_notificar(anteriores, chave):
+                    atualizacao = eh_atualizacao(anteriores)
+                    saldo = _saldo_do_pedido(cur, row["order_id"]) if row["claim_status"] == "closed" else None
+                    texto = montar_mensagem(row, saldo, atualizacao, agora)
+                    if enviar(texto):
+                        cur.execute(
+                            "INSERT INTO slack_notificados (claim_id, status) VALUES (%s,%s) "
+                            "ON CONFLICT DO NOTHING", (row["claim_id"], chave))
+                        conn.commit()
+                        enviadas += 1
                     continue
-                atualizacao = eh_atualizacao(anteriores)
-                saldo = _saldo_do_pedido(cur, row["order_id"]) if row["claim_status"] == "closed" else None
-                texto = montar_mensagem(row, saldo, atualizacao)
-                if enviar(texto):
-                    cur.execute(
-                        "INSERT INTO slack_notificados (claim_id, status) VALUES (%s,%s) "
-                        "ON CONFLICT DO NOTHING", (row["claim_id"], chave))
-                    conn.commit()
-                    enviadas += 1
+                ultimo_aviso = _ultimo_aviso(cur, row["claim_id"])
+                if precisa_lembrete(row, ultimo_aviso, agora):
+                    texto = montar_mensagem_lembrete(row, agora)
+                    if enviar(texto):
+                        marcador = f"lembrete:{agora.isoformat()}"
+                        cur.execute(
+                            "INSERT INTO slack_notificados (claim_id, status) VALUES (%s,%s) "
+                            "ON CONFLICT DO NOTHING", (row["claim_id"], marcador))
+                        conn.commit()
+                        enviadas += 1
     finally:
         conn.close()
     return enviadas
