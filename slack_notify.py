@@ -115,6 +115,13 @@ def prazo_estimado(row: Mapping[str, Any], agora: Optional[datetime] = None) -> 
         criada = row.get("date_created")
         if not criada:
             return "⏰ *Prazo estimado*: ~2 dias corridos para responder (data de abertura não disponível)"
+        if isinstance(criada, str):
+            try:
+                criada = datetime.fromisoformat(criada.replace("Z", "+00:00"))
+            except ValueError:
+                return "⏰ *Prazo estimado*: ~2 dias corridos para responder (data de abertura inválida)"
+        if criada.tzinfo is None:
+            criada = criada.replace(tzinfo=timezone.utc)
         limite = criada + timedelta(days=2)
         restante = limite - agora
         horas = int(restante.total_seconds() // 3600)
@@ -163,7 +170,8 @@ def chave_estado(row: Mapping[str, Any]) -> str:
     Usamos "status:stage" como valor de 'status' -- uma mudanca de etapa
     (ex.: claim -> dispute) ja gera uma chave nova e dispara nova notificacao.
     """
-    return f"{row.get('claim_status')}:{row.get('claim_stage')}"
+    tracking = row.get("return_tracking_status") or row.get("return_status") or ""
+    return f"{row.get('claim_status')}:{row.get('claim_stage')}:{tracking}"
 
 
 def deve_notificar(chaves_anteriores: set[str], chave_atual: str) -> bool:
@@ -293,6 +301,43 @@ def notificar_processos() -> int:
     return enviadas
 
 
+def resumo_diario() -> int:
+    """Resumo diario dos processos fechados ONTEM, com prejuizo confirmado.
+
+    Roda 1x por dia (cedo da manha) via workflow separado, fechando a
+    contabilidade do dia anterior antes do ciclo normal de --once comecar
+    a acompanhar o dia atual.
+    """
+    from src.db.connection import get_db_connection, dict_cursor
+    agora = datetime.now(timezone.utc)
+    hoje_0h = agora.replace(hour=0, minute=0, second=0, microsecond=0)
+    ontem_0h = hoje_0h - timedelta(days=1)
+    data_str = ontem_0h.strftime("%d/%m/%Y")
+
+    conn = get_db_connection()
+    try:
+        with dict_cursor(conn) as cur:
+            cur.execute("SELECT sn.claim_id, d.order_id, d.item_title, d.item_sku, s.total AS saldo FROM slack_notificados sn JOIN ml_devolucoes d ON d.claim_id = sn.claim_id LEFT JOIN meli_page_saldos s ON s.order_id = d.order_id WHERE sn.status LIKE 'closed:%%' AND sn.avisado_em >= %s AND sn.avisado_em < %s", (ontem_0h, hoje_0h))
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    prejuizos = [(r, float(r["saldo"])) for r in rows if r.get("saldo") is not None and float(r["saldo"]) < 0]
+    total = sum(v for _, v in prejuizos)
+
+    if not rows:
+        texto = f":white_check_mark: *Resumo do dia {data_str}*\nNenhum processo fechado ontem — dia zerado."
+    elif not prejuizos:
+        texto = f":white_check_mark: *Resumo do dia {data_str}*\n{len(rows)} processo(s) fechado(s), sem prejuízo — Mercado Livre cobriu ou o resultado ficou positivo."
+    else:
+        linhas = [f":rotating_light: *Resumo do dia {data_str}* — prejuízo confirmado: {_fmt_brl(total)} em {len(prejuizos)} venda(s) (de {len(rows)} processo(s) fechado(s))"]
+        for r, v in prejuizos[:15]:
+            linhas.append(f"• Pedido {r['order_id']} — {r.get('item_title') or 'Produto'} — {_fmt_brl(v)}")
+        texto = "\n".join(linhas)
+
+    return 1 if enviar(texto) else 0
+
+
 def teste() -> None:
     from src.db.connection import get_db_connection
     conn = get_db_connection()
@@ -313,12 +358,17 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--test", action="store_true")
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--resumo-diario", action="store_true", dest="resumo")
     args = ap.parse_args()
     if not _webhook():
         print("slack: sem webhook (SLACK_WEBHOOK_URL ou arquivo local) — nada a fazer")
         return
     if args.test:
         teste()
+    if args.resumo:
+        n = resumo_diario()
+        print("✓ resumo diário enviado ao #sac" if n else "resumo diário: nada a enviar")
+        return
     if args.once or not args.test:
         n = notificar_processos()
         print(f"✓ {n} processo(s) notificado(s) no #sac")

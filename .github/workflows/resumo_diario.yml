@@ -1,12 +1,12 @@
-name: Notificador Slack do SAC
+name: Resumo Diario do SAC
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch: {}
+    - cron: '0 12 * * *'
+  workflow_dispatch:
 
 jobs:
-  notify:
+  resumo:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,8 +19,8 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
-      - name: Notificar processos novos/atualizados no #sac
+      - name: Resumo diario de prejuizos (dia anterior) no #sac
         env:
           ML_NEON_URL: ${{ secrets.ML_NEON_URL }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: python slack_notify.py --once
+        run: python slack_notify.py --resumo-diario
