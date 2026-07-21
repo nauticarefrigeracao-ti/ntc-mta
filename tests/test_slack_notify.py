@@ -15,7 +15,9 @@ from slack_notify import (
     deve_notificar,
     eh_atualizacao,
     montar_mensagem,
+    montar_mensagem_lembrete,
     prazo_estimado,
+    precisa_lembrete,
 )
 
 
@@ -160,7 +162,7 @@ def test_processo_fechado_zero_explica_protecao_ao_vendedor():
 
 def test_processo_fechado_negativo_explica_prejuizo():
     texto = bloco_financeiro(_row(claim_status="closed"), saldo=-164.12)
-    assert "prejuizo confirmado" in texto.lower().replace("í","i")
+    assert "prejuizo confirmado" in texto.lower().replace("í", "i")
     assert "164,12" in texto
 
 
@@ -265,4 +267,46 @@ def test_montar_mensagem_devolucao_fechada_inclui_tracking_e_saldo():
     texto = montar_mensagem(row, saldo=-50.0)
     assert "Entregue" in texto
     assert "BR999" in texto
-    assert "prejuizo confirmado" in texto.lower().replace("í","i")
+    assert "prejuizo confirmado" in texto.lower().replace("í", "i")
+
+
+# --- lembrete / insistencia -----------------------------------------------
+
+def test_nao_lembra_quando_processo_fechado():
+    agora = datetime.now(timezone.utc)
+    assert precisa_lembrete(_row(claim_status="closed"), agora - timedelta(hours=10), agora) is False
+
+
+def test_nao_lembra_para_etapa_sem_necessidade_de_resposta():
+    agora = datetime.now(timezone.utc)
+    assert precisa_lembrete(_row(claim_stage="dispute"), agora - timedelta(hours=10), agora) is False
+
+
+def test_nao_lembra_sem_aviso_anterior():
+    assert precisa_lembrete(_row(claim_stage="claim"), None) is False
+
+
+def test_nao_lembra_antes_do_intervalo():
+    agora = datetime.now(timezone.utc)
+    assert precisa_lembrete(_row(claim_stage="claim"), agora - timedelta(hours=1), agora) is False
+
+
+def test_lembra_apos_intervalo_para_reclamacao_direta():
+    agora = datetime.now(timezone.utc)
+    assert precisa_lembrete(_row(claim_stage="claim"), agora - timedelta(hours=5), agora) is True
+
+
+def test_lembra_apos_intervalo_para_recontato():
+    agora = datetime.now(timezone.utc)
+    assert precisa_lembrete(_row(claim_stage="recontact"), agora - timedelta(hours=5), agora) is True
+
+
+def test_mensagem_lembrete_indica_ainda_sem_resposta():
+    texto = montar_mensagem_lembrete(_row())
+    assert "sem resposta" in texto.lower()
+
+
+def test_mensagem_lembrete_inclui_sku_e_pedido():
+    texto = montar_mensagem_lembrete(_row(item_sku="A12538601", order_id=2000012345678))
+    assert "A12538601" in texto
+    assert "2000012345678" in texto
