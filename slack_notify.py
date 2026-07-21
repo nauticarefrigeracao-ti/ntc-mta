@@ -18,8 +18,8 @@ explicacao financeira sao derivadas de COMPORTAMENTO REAL observado na base
 - return_type e sempre vazio -> usamos return_status para o tracking.
 
 Uso:
-python slack_notify.py --test   # mensagem de resumo (demo)
-python slack_notify.py --once   # notifica processos novos ou com mudanca de estado
+    python slack_notify.py --test   # mensagem de resumo (demo)
+    python slack_notify.py --once   # notifica processos novos ou com mudanca de estado
 """
 from __future__ import annotations
 
@@ -167,14 +167,33 @@ def bloco_financeiro(row: Mapping[str, Any], saldo: Optional[float]) -> str:
             "— prejuízo confirmado, o custo superou a cobertura")
 
 
+def _dados_essenciais_completos(row: Mapping[str, Any]) -> str:
+    """Flag curta (ex.: "11") indicando se SKU e valor da venda ja chegaram.
+
+    Processos recem-abertos costumam aparecer no Slack com "SKU —" e "valor
+    ainda nao sincronizado" porque o registro em ml_devolucoes ainda nao foi
+    enriquecido. Sem isso, a primeira mensagem ficava CONGELADA para sempre
+    com esses dados incompletos, mesmo depois que o sync preenchia tudo --
+    porque claim_status/claim_stage/tracking nao mudavam. Incluir esta flag
+    na chave de estado faz uma nova notificacao (atualizacao) disparar assim
+    que SKU e valor completarem, sem esperar uma mudanca real de etapa.
+    """
+    sku_ok = "1" if row.get("item_sku") else "0"
+    total_ok = "1" if row.get("order_total") else "0"
+    return f"{sku_ok}{total_ok}"
+
+
 def chave_estado(row: Mapping[str, Any]) -> str:
     """Chave composta reaproveitando slack_notificados (claim_id, status) sem migracao.
 
-    Usamos "status:stage" como valor de 'status' -- uma mudanca de etapa
-    (ex.: claim -> dispute) ja gera uma chave nova e dispara nova notificacao.
+    Usamos "status:stage:tracking:dados_completos" como valor de 'status' --
+    uma mudanca de etapa (ex.: claim -> dispute), de tracking, OU o
+    preenchimento tardio de SKU/valor da venda ja gera uma chave nova e
+    dispara nova notificacao.
     """
     tracking = row.get("return_tracking_status") or row.get("return_status") or ""
-    return f"{row.get('claim_status')}:{row.get('claim_stage')}:{tracking}"
+    completos = _dados_essenciais_completos(row)
+    return f"{row.get('claim_status')}:{row.get('claim_stage')}:{tracking}:{completos}"
 
 
 def deve_notificar(chaves_anteriores: set[str], chave_atual: str) -> bool:
@@ -186,6 +205,7 @@ def eh_atualizacao(chaves_anteriores: set[str]) -> bool:
     """True se ja existe pelo menos uma notificacao anterior para este claim
     (ou seja, esta nova mensagem e uma ATUALIZAÇÃO DE ESTADO, nao a primeira)."""
     return len(chaves_anteriores) > 0
+
 
 def precisa_lembrete(row: Mapping[str, Any], ultimo_aviso: Optional[datetime],
                       agora: Optional[datetime] = None) -> bool:
@@ -203,6 +223,7 @@ def precisa_lembrete(row: Mapping[str, Any], ultimo_aviso: Optional[datetime],
     if ultimo_aviso.tzinfo is None:
         ultimo_aviso = ultimo_aviso.replace(tzinfo=timezone.utc)
     return (agora - ultimo_aviso) >= timedelta(hours=REMINDER_INTERVAL_HORAS)
+
 
 def montar_mensagem_lembrete(row: Mapping[str, Any], agora: Optional[datetime] = None) -> str:
     """Mensagem de insistencia para reclamacao/recontato ainda sem resposta --
@@ -259,6 +280,7 @@ def _fmt_brl(v) -> str:
     except Exception:
         return "—"
 
+
 # ---------------------------------------------------------------------------
 # I/O -- Slack, Neon, CLI
 # ---------------------------------------------------------------------------
@@ -300,6 +322,7 @@ def _chaves_anteriores(cur, claim_id) -> set[str]:
     cur.execute("SELECT status FROM slack_notificados WHERE claim_id = %s", (claim_id,))
     return {r[0] for r in cur.fetchall()}
 
+
 def _ultimo_aviso(cur, claim_id) -> Optional[datetime]:
     cur.execute("SELECT MAX(avisado_em) FROM slack_notificados WHERE claim_id = %s", (claim_id,))
     row = cur.fetchone()
@@ -307,7 +330,7 @@ def _ultimo_aviso(cur, claim_id) -> Optional[datetime]:
 
 
 def notificar_processos() -> int:
-    """Processos novos OU com mudanca de estado ainda nao avisados -> #sac."""
+    """Processos novos, com mudanca de estado, ou ainda sem resposta (lembrete) -> #sac."""
     from src.db.connection import get_db_connection, dict_cursor
     conn = get_db_connection()
     enviadas = 0
