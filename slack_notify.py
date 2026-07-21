@@ -164,14 +164,33 @@ def bloco_financeiro(row: Mapping[str, Any], saldo: Optional[float]) -> str:
             "— prejuízo confirmado, o custo superou a cobertura")
 
 
+def _dados_essenciais_completos(row: Mapping[str, Any]) -> str:
+    """Flag curta (ex.: "11") indicando se SKU e valor da venda ja chegaram.
+
+    Processos recem-abertos costumam aparecer no Slack com "SKU —" e "valor
+    ainda nao sincronizado" porque o registro em ml_devolucoes ainda nao foi
+    enriquecido. Sem isso, a primeira mensagem ficava CONGELADA para sempre
+    com esses dados incompletos, mesmo depois que o sync preenchia tudo --
+    porque claim_status/claim_stage/tracking nao mudavam. Incluir esta flag
+    na chave de estado faz uma nova notificacao (atualizacao) disparar assim
+    que SKU e valor completarem, sem esperar uma mudanca real de etapa.
+    """
+    sku_ok = "1" if row.get("item_sku") else "0"
+    total_ok = "1" if row.get("order_total") else "0"
+    return f"{sku_ok}{total_ok}"
+
+
 def chave_estado(row: Mapping[str, Any]) -> str:
     """Chave composta reaproveitando slack_notificados (claim_id, status) sem migracao.
 
-    Usamos "status:stage" como valor de 'status' -- uma mudanca de etapa
-    (ex.: claim -> dispute) ja gera uma chave nova e dispara nova notificacao.
+    Usamos "status:stage:tracking:dados_completos" como valor de 'status' --
+    uma mudanca de etapa (ex.: claim -> dispute), de tracking, OU o
+    preenchimento tardio de SKU/valor da venda ja gera uma chave nova e
+    dispara nova notificacao.
     """
     tracking = row.get("return_tracking_status") or row.get("return_status") or ""
-    return f"{row.get('claim_status')}:{row.get('claim_stage')}:{tracking}"
+    completos = _dados_essenciais_completos(row)
+    return f"{row.get('claim_status')}:{row.get('claim_stage')}:{tracking}:{completos}"
 
 
 def deve_notificar(chaves_anteriores: set[str], chave_atual: str) -> bool:
