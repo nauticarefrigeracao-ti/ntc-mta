@@ -172,7 +172,46 @@ def test_processo_fechado_sem_saldo_ainda_diz_conciliacao_pendente():
 # --- estado / re-notificacao ------------------------------------------------
 
 def test_chave_estado_combina_status_e_etapa():
-    assert chave_estado(_row(claim_status="opened", claim_stage="claim")) == "opened:claim"
+    # base row ja tem item_sku e order_total preenchidos -> flag "11"
+    assert chave_estado(_row(claim_status="opened", claim_stage="claim")) == "opened:claim::11"
+
+
+def test_chave_estado_marca_sku_ausente_como_incompleto():
+    chave = chave_estado(_row(item_sku=None))
+    assert chave.endswith(":01")
+
+
+def test_chave_estado_marca_total_zerado_como_incompleto():
+    chave = chave_estado(_row(order_total=0))
+    assert chave.endswith(":10")
+
+
+def test_chave_estado_marca_ambos_ausentes_como_incompleto():
+    chave = chave_estado(_row(item_sku=None, order_total=0))
+    assert chave.endswith(":00")
+
+
+def test_chave_estado_muda_quando_sku_chega_depois_do_primeiro_aviso():
+    # Processo notificado pela primeira vez sem SKU...
+    chave_incompleta = chave_estado(_row(item_sku=None))
+    # ...depois o sync preenche o SKU, mas claim_status/stage/tracking sao os mesmos
+    chave_completa = chave_estado(_row(item_sku="NR5629-2"))
+    assert chave_incompleta != chave_completa
+    assert deve_notificar({chave_incompleta}, chave_completa) is True
+
+
+def test_chave_estado_muda_quando_valor_da_venda_sincroniza_depois():
+    chave_incompleta = chave_estado(_row(order_total=0))
+    chave_completa = chave_estado(_row(order_total=665.46))
+    assert chave_incompleta != chave_completa
+    assert deve_notificar({chave_incompleta}, chave_completa) is True
+
+
+def test_chave_estado_nao_muda_quando_dados_completos_permanecem_completos():
+    chave_1 = chave_estado(_row(item_sku="NR5629-2", order_total=665.46))
+    chave_2 = chave_estado(_row(item_sku="NR5629-2", order_total=665.46))
+    assert chave_1 == chave_2
+    assert deve_notificar({chave_1}, chave_2) is False
 
 
 def test_deve_notificar_quando_chave_e_nova():
