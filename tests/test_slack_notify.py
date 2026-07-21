@@ -162,7 +162,7 @@ def test_processo_fechado_zero_explica_protecao_ao_vendedor():
 
 def test_processo_fechado_negativo_explica_prejuizo():
     texto = bloco_financeiro(_row(claim_status="closed"), saldo=-164.12)
-    assert "prejuizo confirmado" in texto.lower().replace("í","i")
+    assert "prejuizo confirmado" in texto.lower().replace("í", "i")
     assert "164,12" in texto
 
 
@@ -174,7 +174,46 @@ def test_processo_fechado_sem_saldo_ainda_diz_conciliacao_pendente():
 # --- estado / re-notificacao ------------------------------------------------
 
 def test_chave_estado_combina_status_e_etapa():
-    assert chave_estado(_row(claim_status="opened", claim_stage="claim")) == "opened:claim"
+    # base row ja tem item_sku e order_total preenchidos -> flag "11"
+    assert chave_estado(_row(claim_status="opened", claim_stage="claim")) == "opened:claim::11"
+
+
+def test_chave_estado_marca_sku_ausente_como_incompleto():
+    chave = chave_estado(_row(item_sku=None))
+    assert chave.endswith(":01")
+
+
+def test_chave_estado_marca_total_zerado_como_incompleto():
+    chave = chave_estado(_row(order_total=0))
+    assert chave.endswith(":10")
+
+
+def test_chave_estado_marca_ambos_ausentes_como_incompleto():
+    chave = chave_estado(_row(item_sku=None, order_total=0))
+    assert chave.endswith(":00")
+
+
+def test_chave_estado_muda_quando_sku_chega_depois_do_primeiro_aviso():
+    # Processo notificado pela primeira vez sem SKU...
+    chave_incompleta = chave_estado(_row(item_sku=None))
+    # ...depois o sync preenche o SKU, mas claim_status/stage/tracking sao os mesmos
+    chave_completa = chave_estado(_row(item_sku="NR5629-2"))
+    assert chave_incompleta != chave_completa
+    assert deve_notificar({chave_incompleta}, chave_completa) is True
+
+
+def test_chave_estado_muda_quando_valor_da_venda_sincroniza_depois():
+    chave_incompleta = chave_estado(_row(order_total=0))
+    chave_completa = chave_estado(_row(order_total=665.46))
+    assert chave_incompleta != chave_completa
+    assert deve_notificar({chave_incompleta}, chave_completa) is True
+
+
+def test_chave_estado_nao_muda_quando_dados_completos_permanecem_completos():
+    chave_1 = chave_estado(_row(item_sku="NR5629-2", order_total=665.46))
+    chave_2 = chave_estado(_row(item_sku="NR5629-2", order_total=665.46))
+    assert chave_1 == chave_2
+    assert deve_notificar({chave_1}, chave_2) is False
 
 
 def test_deve_notificar_quando_chave_e_nova():
@@ -228,7 +267,8 @@ def test_montar_mensagem_devolucao_fechada_inclui_tracking_e_saldo():
     texto = montar_mensagem(row, saldo=-50.0)
     assert "Entregue" in texto
     assert "BR999" in texto
-    assert "prejuizo confirmado" in texto.lower().replace("í","i")
+    assert "prejuizo confirmado" in texto.lower().replace("í", "i")
+
 
 # --- lembrete / insistencia -----------------------------------------------
 
@@ -236,28 +276,35 @@ def test_nao_lembra_quando_processo_fechado():
     agora = datetime.now(timezone.utc)
     assert precisa_lembrete(_row(claim_status="closed"), agora - timedelta(hours=10), agora) is False
 
+
 def test_nao_lembra_para_etapa_sem_necessidade_de_resposta():
     agora = datetime.now(timezone.utc)
     assert precisa_lembrete(_row(claim_stage="dispute"), agora - timedelta(hours=10), agora) is False
 
+
 def test_nao_lembra_sem_aviso_anterior():
     assert precisa_lembrete(_row(claim_stage="claim"), None) is False
+
 
 def test_nao_lembra_antes_do_intervalo():
     agora = datetime.now(timezone.utc)
     assert precisa_lembrete(_row(claim_stage="claim"), agora - timedelta(hours=1), agora) is False
 
+
 def test_lembra_apos_intervalo_para_reclamacao_direta():
     agora = datetime.now(timezone.utc)
     assert precisa_lembrete(_row(claim_stage="claim"), agora - timedelta(hours=5), agora) is True
+
 
 def test_lembra_apos_intervalo_para_recontato():
     agora = datetime.now(timezone.utc)
     assert precisa_lembrete(_row(claim_stage="recontact"), agora - timedelta(hours=5), agora) is True
 
+
 def test_mensagem_lembrete_indica_ainda_sem_resposta():
     texto = montar_mensagem_lembrete(_row())
     assert "sem resposta" in texto.lower()
+
 
 def test_mensagem_lembrete_inclui_sku_e_pedido():
     texto = montar_mensagem_lembrete(_row(item_sku="A12538601", order_id=2000012345678))
