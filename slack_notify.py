@@ -1,8 +1,13 @@
 """Notificador Slack do SAC -- reclamacoes, devolucoes e cancelamentos do ML no #sac.
 ================================================================================
-Le a URL do webhook da variavel de ambiente SLACK_WEBHOOK_URL (uso em GitHub
-Actions) ou, em modo local, do arquivo fora do repo:
-C:\\Users\\Pichau\\slack_webhook.txt
+Envia via Slack Bot Token (slack_client.post_message, chat.postMessage) --
+nao mais Incoming Webhook. Motivo (2026-07-24): um Incoming Webhook nunca
+devolve o `ts` da mensagem enviada, entao nao ha como responder "dentro"
+dela depois. Com o Bot Token, cada VENDA (order_id) vira uma thread: a
+primeira notificacao daquela venda cria a mensagem-raiz; qualquer
+atualizacao de estado da MESMA venda (nova etapa, tracking, lembrete)
+responde na MESMA thread, em vez de virar mensagem solta nova e
+desconectada no canal -- ver slack_threads (tabela nova).
 
 Funcoes puras (sem I/O) ficam no topo do modulo e sao cobertas por
 tests/test_slack_notify.py -- categorizacao, tracking, prazo estimado e
@@ -18,26 +23,26 @@ explicacao financeira sao derivadas de COMPORTAMENTO REAL observado na base
 - return_type e sempre vazio -> usamos return_status para o tracking.
 
 Uso:
-    python slack_notify.py --test   # mensagem de resumo (demo)
-    python slack_notify.py --once   # notifica processos novos ou com mudanca de estado
+    python slack_notify.py --test                    # mensagem de resumo (demo)
+    python slack_notify.py --once                    # notifica processos novos/atualizados
+    python slack_notify.py --once --canal "#sac-teste"  # mesma coisa, canal de teste
 """
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+import slack_client
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-WEBHOOK_FILE = Path(r"C:\Users\Pichau\slack_webhook.txt")
+CANAL_PADRAO = "#sac"
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS slack_notificados (
@@ -45,6 +50,15 @@ CREATE TABLE IF NOT EXISTS slack_notificados (
     status TEXT NOT NULL,
     avisado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (claim_id, status)
+)
+"""
+
+_DDL_THREADS = """
+CREATE TABLE IF NOT EXISTS slack_threads (
+    order_id BIGINT PRIMARY KEY,
+    channel TEXT NOT NULL,
+    thread_ts TEXT NOT NULL,
+    criado_em TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 """
 
@@ -285,31 +299,38 @@ def _fmt_brl(v) -> str:
 # I/O -- Slack, Neon, CLI
 # ---------------------------------------------------------------------------
 
-def _webhook() -> Optional[str]:
-    env = os.environ.get("SLACK_WEBHOOK_URL")
-    if env and env.startswith("https://hooks.slack.com/"):
-        return env
-    try:
-        url = WEBHOOK_FILE.read_text(encoding="utf-8").strip().splitlines()[0].strip()
-        return url if url.startswith("https://hooks.slack.com/") else None
-    except Exception:
-        return None
+def _get_thread(cur, order_id) -> Optional[tuple[str, str]]:
+    cur.execute("SELECT channel, thread_ts FROM slack_threads WHERE order_id = %s", (order_id,))
+    row = cur.fetchone()
+    return (row[0], row[1]) if row else None
 
 
-def enviar(texto: str) -> bool:
-    url = _webhook()
-    if not url:
+def _save_thread(cur, order_id, channel: str, thread_ts: str) -> None:
+    cur.execute(
+        "INSERT INTO slack_threads (order_id, channel, thread_ts) VALUES (%s,%s,%s) "
+        "ON CONFLICT (order_id) DO UPDATE SET channel=EXCLUDED.channel, thread_ts=EXCLUDED.thread_ts",
+        (order_id, channel, thread_ts),
+    )
+
+
+def enviar_na_venda(cur, canal: str, order_id, texto: str) -> bool:
+    """Posta agrupado por venda: raiz se a venda ainda nao tem thread,
+    resposta na MESMA thread se ja tem -- e assim uma venda vira um card
+    so que evolui, em vez de mensagens soltas desconectadas."""
+    existente = _get_thread(cur, order_id)
+    thread_ts = existente[1] if existente else None
+    ts = slack_client.post_message(canal, texto, thread_ts=thread_ts)
+    if not ts:
         return False
-    payload = {"text": texto}
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return r.status == 200
-    except Exception as exc:
-        print(f"slack: falha no envio: {type(exc).__name__}: {exc}")
-        return False
+    if not existente:
+        _save_thread(cur, order_id, canal, ts)
+    return True
+
+
+def enviar(canal: str, texto: str) -> bool:
+    """Mensagem avulsa (resumo diario, teste) -- nao esta amarrada a uma
+    venda especifica, entao nunca precisa de thread."""
+    return bool(slack_client.post_message(canal, texto))
 
 
 def _saldo_do_pedido(cur, order_id) -> Optional[float]:
@@ -329,7 +350,7 @@ def _ultimo_aviso(cur, claim_id) -> Optional[datetime]:
     return row[0] if row and row[0] is not None else None
 
 
-def notificar_processos() -> int:
+def notificar_processos(canal: str = CANAL_PADRAO) -> int:
     """Processos novos, com mudanca de estado, ou ainda sem resposta (lembrete) -> #sac."""
     from src.db.connection import get_db_connection, dict_cursor
     conn = get_db_connection()
@@ -337,6 +358,7 @@ def notificar_processos() -> int:
     try:
         with conn.cursor() as cur:
             cur.execute(_DDL)
+            cur.execute(_DDL_THREADS)
             conn.commit()
         with dict_cursor(conn) as cur:
             cur.execute("""
@@ -359,7 +381,7 @@ def notificar_processos() -> int:
                     atualizacao = eh_atualizacao(anteriores)
                     saldo = _saldo_do_pedido(cur, row["order_id"]) if row["claim_status"] == "closed" else None
                     texto = montar_mensagem(row, saldo, atualizacao, agora)
-                    if enviar(texto):
+                    if enviar_na_venda(cur, canal, row["order_id"], texto):
                         cur.execute(
                             "INSERT INTO slack_notificados (claim_id, status) VALUES (%s,%s) "
                             "ON CONFLICT DO NOTHING", (row["claim_id"], chave))
@@ -369,7 +391,7 @@ def notificar_processos() -> int:
                 ultimo_aviso = _ultimo_aviso(cur, row["claim_id"])
                 if precisa_lembrete(row, ultimo_aviso, agora):
                     texto = montar_mensagem_lembrete(row, agora)
-                    if enviar(texto):
+                    if enviar_na_venda(cur, canal, row["order_id"], texto):
                         marcador = f"lembrete:{agora.isoformat()}"
                         cur.execute(
                             "INSERT INTO slack_notificados (claim_id, status) VALUES (%s,%s) "
@@ -381,7 +403,7 @@ def notificar_processos() -> int:
     return enviadas
 
 
-def resumo_diario() -> int:
+def resumo_diario(canal: str = CANAL_PADRAO) -> int:
     """Resumo diario dos processos fechados ONTEM, com prejuizo confirmado.
 
     Roda 1x por dia (cedo da manha) via workflow separado, fechando a
@@ -415,10 +437,10 @@ def resumo_diario() -> int:
             linhas.append(f"• Pedido {r['order_id']} — {r.get('item_title') or 'Produto'} — {_fmt_brl(v)}")
         texto = "\n".join(linhas)
 
-    return 1 if enviar(texto) else 0
+    return 1 if enviar(canal, texto) else 0
 
 
-def teste() -> None:
+def teste(canal: str = CANAL_PADRAO) -> None:
     from src.db.connection import get_db_connection
     conn = get_db_connection()
     with conn.cursor() as cur:
@@ -426,12 +448,13 @@ def teste() -> None:
         n, v = cur.fetchone()
     conn.close()
     ok = enviar(
+        canal,
         f":bar_chart: *Painel de Devoluções — Náutica Refrigeração*\n"
         f"Neste momento: *{n} disputas em andamento*, {_fmt_brl(v)} em jogo.\n"
         f"Toda reclamação, mediação, devolução e cancelamento do Mercado Livre chega aqui "
         f"no *#sac* com categoria, motivo, valor e prazo estimado.\n"
         f"<https://ntc-mta.streamlit.app|Abrir o painel completo>")
-    print("✓ mensagem de teste enviada ao #sac" if ok else "✗ não enviou — confira o webhook")
+    print(f"✓ mensagem de teste enviada ao {canal}" if ok else "✗ não enviou — confira o Bot Token")
 
 
 def main() -> None:
@@ -439,19 +462,21 @@ def main() -> None:
     ap.add_argument("--test", action="store_true")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--resumo-diario", action="store_true", dest="resumo")
+    ap.add_argument("--canal", default=CANAL_PADRAO,
+                    help=f"canal do Slack (default {CANAL_PADRAO})")
     args = ap.parse_args()
-    if not _webhook():
-        print("slack: sem webhook (SLACK_WEBHOOK_URL ou arquivo local) — nada a fazer")
+    if not slack_client._token():
+        print("slack: sem Bot Token (SLACK_BOT_TOKEN ou arquivo local) — nada a fazer")
         return
     if args.test:
-        teste()
+        teste(args.canal)
     if args.resumo:
-        n = resumo_diario()
-        print("✓ resumo diário enviado ao #sac" if n else "resumo diário: nada a enviar")
+        n = resumo_diario(args.canal)
+        print("✓ resumo diário enviado" if n else "resumo diário: nada a enviar")
         return
     if args.once or not args.test:
-        n = notificar_processos()
-        print(f"✓ {n} processo(s) notificado(s) no #sac")
+        n = notificar_processos(args.canal)
+        print(f"✓ {n} processo(s) notificado(s) em {args.canal}")
 
 
 if __name__ == "__main__":

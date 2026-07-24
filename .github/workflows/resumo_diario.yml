@@ -22,5 +22,5 @@ jobs:
       - name: Resumo diario de prejuizos (dia anterior) no #sac
         env:
           ML_NEON_URL: ${{ secrets.ML_NEON_URL }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: python slack_notify.py --resumo-diario
