@@ -5,6 +5,14 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch: {}
 
+# Serializa: nunca dois notificadores rodando ao mesmo tempo (evita corrida
+# entre post_message e o INSERT em slack_notificados -> mensagem duplicada no
+# #sac). cancel-in-progress=false: o novo espera o atual terminar, nunca corta
+# um envio pela metade.
+concurrency:
+  group: notify-slack-sac
+  cancel-in-progress: false
+
 jobs:
   notify:
     runs-on: ubuntu-latest

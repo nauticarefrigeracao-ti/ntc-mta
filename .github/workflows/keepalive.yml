@@ -1,0 +1,43 @@
+name: Keepalive (mantem os crons do SAC vivos)
+
+# O GitHub DESABILITA workflows agendados (cron) apos 60 dias sem NENHUM commit
+# no repo. Se o desenvolvimento pausar, o notificador do Slack morreria em
+# silencio. Este job roda semanalmente e, se o repo estiver idle ha >=50 dias,
+# faz um commit trivial que reinicia esse contador -- garantindo que o
+# notify_slack e o resumo_diario nunca sejam desligados por inatividade.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # toda segunda, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Commit de keepalive se o repo estiver idle >= 50 dias
+        run: |
+          last=$(git log -1 --format=%ct)
+          now=$(date +%s)
+          dias=$(( (now - last) / 86400 ))
+          echo "Ultimo commit ha $dias dia(s)."
+          if [ "$dias" -ge 50 ]; then
+            git config user.name "keepalive-bot"
+            git config user.email "actions@github.com"
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive
+            git add .keepalive
+            git commit -m "chore: keepalive — evita GH desabilitar os crons do SAC por inatividade"
+            git push
+            echo "Keepalive commitado."
+          else
+            echo "Repo ativo (< 50 dias) — keepalive nao necessario."
+          fi
