@@ -221,6 +221,21 @@ def eh_atualizacao(chaves_anteriores: set[str]) -> bool:
     return len(chaves_anteriores) > 0
 
 
+def deve_anunciar(claim_status: str, ja_notificado_antes: bool) -> bool:
+    """R4 (pedido do chefe): NAO anunciar no canal operacional um caso que ja
+    nasce FECHADO e nunca foi notificado antes. Isso e um caso do PASSADO (ja
+    resolvido no ML) — cantar como "novo processo"/pendencia confundiria a
+    Maria e levaria a um id antigo. Esses vao pro fechamento diario, nao pro
+    #sac operacional.
+
+    - opened                  -> sempre anuncia (fila viva da Maria).
+    - closed + com historico  -> anuncia (encerramento na thread que ela ja via).
+    - closed + sem historico  -> NAO anuncia (caso do passado; vai pro resumo)."""
+    if claim_status == "closed" and not ja_notificado_antes:
+        return False
+    return True
+
+
 def precisa_lembrete(row: Mapping[str, Any], ultimo_aviso: Optional[datetime],
                       agora: Optional[datetime] = None) -> bool:
     """True se o processo ainda exige resposta do vendedor (reclamacao direta
@@ -379,6 +394,9 @@ def notificar_processos(canal: str = CANAL_PADRAO) -> int:
                 chave = chave_estado(row)
                 if deve_notificar(anteriores, chave):
                     atualizacao = eh_atualizacao(anteriores)
+                    # R4: pula caso que ja nasce fechado sem historico (passado).
+                    if not deve_anunciar(row["claim_status"], atualizacao):
+                        continue
                     saldo = _saldo_do_pedido(cur, row["order_id"]) if row["claim_status"] == "closed" else None
                     texto = montar_mensagem(row, saldo, atualizacao, agora)
                     if enviar_na_venda(cur, canal, row["order_id"], texto):

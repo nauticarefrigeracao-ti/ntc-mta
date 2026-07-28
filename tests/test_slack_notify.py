@@ -12,6 +12,7 @@ from slack_notify import (
     bloco_tracking,
     categorizar,
     chave_estado,
+    deve_anunciar,
     deve_notificar,
     eh_atualizacao,
     montar_mensagem,
@@ -310,3 +311,24 @@ def test_mensagem_lembrete_inclui_sku_e_pedido():
     texto = montar_mensagem_lembrete(_row(item_sku="A12538601", order_id=2000012345678))
     assert "A12538601" in texto
     assert "2000012345678" in texto
+
+
+# ── deve_anunciar (R4): nao cantar caso do passado no canal operacional ──────
+
+def test_anuncia_claim_aberto_sem_historico():
+    # fila viva da Maria — sempre anuncia
+    assert deve_anunciar("opened", ja_notificado_antes=False) is True
+
+
+def test_anuncia_claim_aberto_com_historico():
+    assert deve_anunciar("opened", ja_notificado_antes=True) is True
+
+
+def test_nao_anuncia_fechado_sem_historico():
+    # caso que ja nasce fechado e nunca foi notificado = passado -> nao canta
+    assert deve_anunciar("closed", ja_notificado_antes=False) is False
+
+
+def test_anuncia_fechado_com_historico():
+    # caso que a Maria ja acompanhava e agora fechou -> encerramento na thread
+    assert deve_anunciar("closed", ja_notificado_antes=True) is True
