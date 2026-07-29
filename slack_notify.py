@@ -30,6 +30,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -311,8 +312,99 @@ def _fmt_brl(v) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Quadro Kanban do SAC (R10) -- funcoes puras
+# ---------------------------------------------------------------------------
+
+# Familias de codigo de motivo do ML -> linguagem da Maria (R5, seed).
+_MOTIVO_FAMILIA = {
+    "PNR": "Produto não recebido",
+    "PDD": "Problema com o produto",
+    "CS": "Cancelamento",
+}
+_RE_CODIGO_MOTIVO = re.compile(r"^([A-Z]{2,4})\d+$")
+
+
+def motivo_humano(reason_label) -> str:
+    """Traduz o motivo pra linguagem da Maria (R5). Se ja e texto (ex.:
+    "Produto não funciona"), devolve como esta; se e codigo cru (PNR3837,
+    PDD9952, CS6499), devolve a familia legivel. Nunca mostra codigo cru."""
+    s = (reason_label or "").strip()
+    if not s:
+        return "Motivo não informado"
+    m = _RE_CODIGO_MOTIVO.match(s)
+    if m:
+        return _MOTIVO_FAMILIA.get(m.group(1), "Problema com o produto")
+    return s
+
+
+def classificar_kanban(row: Mapping[str, Any]) -> str:
+    """Coluna do Kanban da Maria a partir do estado REAL do caso:
+    - 'a_fazer'   : aberto em reclamacao/recontato -> bola com o VENDEDOR,
+                    o prazo corre, ela precisa responder no ML.
+    - 'aguardando': aberto em disputa/mediacao (ML arbitra) ou em transito
+                    -> bola com o ML/correio, ela so acompanha.
+    - 'feito'     : fechado, com desfecho.
+    """
+    if row.get("claim_status") == "closed":
+        return "feito"
+    if row.get("claim_stage") in ("claim", "recontact"):
+        return "a_fazer"
+    return "aguardando"
+
+
+def _link_venda(oid) -> str:
+    return f"https://www.mercadolivre.com.br/vendas/{oid}/detalhe"
+
+
+def _linha_quadro(row: Mapping[str, Any]) -> str:
+    """Uma linha do quadro: produto (SKU) · motivo humano · link CTA."""
+    titulo = (row.get("item_title") or "Produto").strip() or "Produto"
+    if len(titulo) > 48:
+        titulo = titulo[:47].rstrip() + "…"
+    sku = row.get("item_sku") or "—"
+    motivo = motivo_humano(row.get("reason_label"))
+    oid = row.get("order_id")
+    return f"• *{titulo}* (SKU {sku}) · _{motivo}_ · <{_link_venda(oid)}|abrir a venda>"
+
+
+def montar_quadro(rows, data_str: str) -> str:
+    """Monta o 'Quadro do SAC' — visao Kanban do dia. A FAZER e listado (o
+    que a Maria precisa AGIR, com CTA); AGUARDANDO e FEITO viram contadores
+    (ela nao precisa agir neles). rows = claims abertos + fechados recentes."""
+    a_fazer, aguardando, feito = [], [], []
+    for r in rows:
+        col = classificar_kanban(r)
+        (a_fazer if col == "a_fazer" else aguardando if col == "aguardando" else feito).append(r)
+
+    L = [f"🗂️ *Quadro do SAC — {data_str}*", ""]
+
+    L.append(f"🔴 *A FAZER — {len(a_fazer)}*   _responda no ML, o prazo corre_")
+    if a_fazer:
+        L += [_linha_quadro(r) for r in a_fazer]
+    else:
+        L.append("_Nada pendente da sua parte agora. 👏_")
+    L.append("")
+
+    L.append(f"🟡 *AGUARDANDO — {len(aguardando)}*   "
+             "_o Mercado Livre está arbitrando ou o produto está a caminho; só acompanhar_")
+    L.append("")
+
+    L.append(f"🟢 *FEITO — {len(feito)}*   "
+             "_casos já encerrados; o balanço em R$ sai no #sac-fechamento_")
+    return "\n".join(L)
+
+
+# ---------------------------------------------------------------------------
 # I/O -- Slack, Neon, CLI
 # ---------------------------------------------------------------------------
+
+_DDL_BOARD = """
+CREATE TABLE IF NOT EXISTS slack_board (
+    channel TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    atualizado_em TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
 
 def _get_thread(cur, order_id) -> Optional[tuple[str, str]]:
     cur.execute("SELECT channel, thread_ts FROM slack_threads WHERE order_id = %s", (order_id,))
@@ -418,7 +510,69 @@ def notificar_processos(canal: str = CANAL_PADRAO) -> int:
                         enviadas += 1
     finally:
         conn.close()
+    # Atualiza o Quadro Kanban depois de processar as notificacoes.
+    try:
+        publicar_quadro(canal)
+    except Exception:
+        pass
     return enviadas
+
+
+def _get_board_ts(cur, canal: str) -> Optional[str]:
+    cur.execute("SELECT ts FROM slack_board WHERE channel = %s", (canal,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _save_board_ts(cur, canal: str, ts: str) -> None:
+    cur.execute(
+        "INSERT INTO slack_board (channel, ts, atualizado_em) "
+        "VALUES (%s, %s, CURRENT_TIMESTAMP) "
+        "ON CONFLICT (channel) DO UPDATE SET ts=EXCLUDED.ts, atualizado_em=CURRENT_TIMESTAMP",
+        (canal, ts),
+    )
+
+
+def publicar_quadro(canal: str = CANAL_PADRAO) -> bool:
+    """Publica/atualiza o Quadro Kanban do SAC no canal. Se ja existe um quadro,
+    ATUALIZA in-place (chat.update) em vez de postar outro — o canal nao vira um
+    monte de quadros. Le abertos + fechados nas ultimas 24h."""
+    from src.db.connection import get_db_connection, dict_cursor
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_DDL_BOARD)
+            conn.commit()
+        with dict_cursor(conn) as cur:
+            cur.execute("""
+                SELECT claim_id, order_id, claim_status, claim_stage,
+                       reason_label, item_title, item_sku
+                FROM ml_devolucoes
+                WHERE claim_status = 'opened'
+                   OR (claim_status = 'closed'
+                       AND date_updated ~ '^[0-9]{4}-'
+                       AND date_updated::timestamptz > NOW() - interval '24 hours')
+                ORDER BY date_updated DESC NULLS LAST
+                LIMIT 200
+            """)
+            rows = cur.fetchall()
+        data_str = datetime.now(timezone.utc).strftime("%d/%m")
+        texto = montar_quadro(rows, data_str)
+        with conn.cursor() as cur:
+            ts_atual = _get_board_ts(cur, canal)
+        novo_ts = None
+        if ts_atual:
+            novo_ts = slack_client.update_message(canal, ts_atual, texto)
+        if not novo_ts:  # sem quadro ainda, ou a msg antiga sumiu -> posta novo
+            novo_ts = slack_client.post_message(canal, texto)
+        if novo_ts:
+            with conn.cursor() as cur:
+                _save_board_ts(cur, canal, novo_ts)
+            conn.commit()
+            return True
+        return False
+    finally:
+        conn.close()
 
 
 def resumo_diario(canal: str = CANAL_PADRAO) -> int:
@@ -480,6 +634,7 @@ def main() -> None:
     ap.add_argument("--test", action="store_true")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--resumo-diario", action="store_true", dest="resumo")
+    ap.add_argument("--quadro", action="store_true", help="publica/atualiza o Quadro Kanban")
     ap.add_argument("--canal", default=CANAL_PADRAO,
                     help=f"canal do Slack (default {CANAL_PADRAO})")
     args = ap.parse_args()
@@ -488,6 +643,10 @@ def main() -> None:
         return
     if args.test:
         teste(args.canal)
+    if args.quadro:
+        ok = publicar_quadro(args.canal)
+        print("✓ quadro atualizado" if ok else "quadro: falhou")
+        return
     if args.resumo:
         n = resumo_diario(args.canal)
         print("✓ resumo diário enviado" if n else "resumo diário: nada a enviar")

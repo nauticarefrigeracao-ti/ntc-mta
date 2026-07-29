@@ -12,11 +12,14 @@ from slack_notify import (
     bloco_tracking,
     categorizar,
     chave_estado,
+    classificar_kanban,
     deve_anunciar,
     deve_notificar,
     eh_atualizacao,
     montar_mensagem,
     montar_mensagem_lembrete,
+    montar_quadro,
+    motivo_humano,
     prazo_estimado,
     precisa_lembrete,
 )
@@ -332,3 +335,90 @@ def test_nao_anuncia_fechado_sem_historico():
 def test_anuncia_fechado_com_historico():
     # caso que a Maria ja acompanhava e agora fechou -> encerramento na thread
     assert deve_anunciar("closed", ja_notificado_antes=True) is True
+
+
+# ── R5 seed: motivo_humano (nunca mostrar codigo cru pra Maria) ─────────────
+
+def test_motivo_ja_humano_passa_direto():
+    assert motivo_humano("Produto não funciona") == "Produto não funciona"
+
+
+def test_motivo_codigo_pnr_vira_produto_nao_recebido():
+    assert motivo_humano("PNR3837") == "Produto não recebido"
+
+
+def test_motivo_codigo_pdd_vira_problema_com_produto():
+    assert motivo_humano("PDD9952") == "Problema com o produto"
+
+
+def test_motivo_codigo_cs_vira_cancelamento():
+    assert motivo_humano("CS6499") == "Cancelamento"
+
+
+def test_motivo_codigo_desconhecido_tem_fallback_legivel():
+    # nunca devolve o codigo cru — cai num rotulo generico legivel
+    out = motivo_humano("XYZ1234")
+    assert "1234" not in out and out
+
+
+def test_motivo_vazio_tem_texto():
+    assert motivo_humano("") == "Motivo não informado"
+    assert motivo_humano(None) == "Motivo não informado"
+
+
+# ── R10: classificar_kanban (onde esta a bola?) ─────────────────────────────
+
+def test_kanban_reclamacao_aberta_e_a_fazer():
+    assert classificar_kanban({"claim_status": "opened", "claim_stage": "claim"}) == "a_fazer"
+
+
+def test_kanban_recontato_e_a_fazer():
+    assert classificar_kanban({"claim_status": "opened", "claim_stage": "recontact"}) == "a_fazer"
+
+
+def test_kanban_disputa_e_aguardando():
+    assert classificar_kanban({"claim_status": "opened", "claim_stage": "dispute"}) == "aguardando"
+
+
+def test_kanban_fechado_e_feito():
+    assert classificar_kanban({"claim_status": "closed", "claim_stage": "dispute"}) == "feito"
+
+
+# ── R10: montar_quadro (o Quadro Kanban do dia) ─────────────────────────────
+
+def _krow(**over):
+    base = {"claim_status": "opened", "claim_stage": "claim", "order_id": 2000012345678,
+            "reason_label": "Produto não funciona", "item_title": "Motor X", "item_sku": "NR1"}
+    base.update(over)
+    return base
+
+
+def test_quadro_conta_as_tres_colunas():
+    rows = [
+        _krow(claim_stage="claim"),                 # a_fazer
+        _krow(claim_stage="recontact"),             # a_fazer
+        _krow(claim_stage="dispute"),               # aguardando
+        _krow(claim_status="closed"),               # feito
+    ]
+    texto = montar_quadro(rows, "28/07")
+    assert "A FAZER — 2" in texto
+    assert "AGUARDANDO — 1" in texto
+    assert "FEITO — 1" in texto
+
+
+def test_quadro_lista_cta_dos_a_fazer_com_link_e_sku():
+    texto = montar_quadro([_krow(item_sku="NR5461", order_id=999)], "28/07")
+    assert "NR5461" in texto
+    assert "mercadolivre.com.br/vendas/999/detalhe" in texto
+
+
+def test_quadro_traduz_codigo_de_motivo_no_a_fazer():
+    texto = montar_quadro([_krow(reason_label="PNR3837")], "28/07")
+    assert "Produto não recebido" in texto
+    assert "PNR3837" not in texto
+
+
+def test_quadro_sem_a_fazer_mostra_parabens():
+    texto = montar_quadro([_krow(claim_stage="dispute")], "28/07")
+    assert "A FAZER — 0" in texto
+    assert "Nada pendente" in texto

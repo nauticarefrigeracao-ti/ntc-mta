@@ -104,3 +104,62 @@ def post_message(
         if not body.get("ok"):
             return None
         return body.get("ts")
+
+
+_API_UPDATE = "https://slack.com/api/chat.update"
+
+
+def update_message(
+    channel: str,
+    ts: str,
+    text: str,
+    *,
+    max_retries: int = 3,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> Optional[str]:
+    """Atualiza (chat.update) uma mensagem existente IN-PLACE. Retorna o `ts`
+    em sucesso, None em falha (nunca lanca). Usado pelo Quadro Kanban do SAC,
+    que se ATUALIZA a cada ciclo em vez de postar um quadro novo -- senao
+    poluiria o canal com dezenas de quadros por dia. Mesmo retry/backoff do
+    post_message."""
+    tok = _token()
+    if not tok:
+        return None
+    payload = {"channel": channel, "ts": ts, "text": text}
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Authorization": f"Bearer {tok}",
+    }
+    data = json.dumps(payload).encode("utf-8")
+    tentativa = 0
+    backoff = 0.5
+    while True:
+        req = urllib.request.Request(_API_UPDATE, data=data, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and tentativa < max_retries:
+                try:
+                    espera = float(exc.headers.get("Retry-After", 1)) if exc.headers else 1.0
+                except Exception:
+                    espera = 1.0
+                sleep_fn(espera)
+                tentativa += 1
+                continue
+            if 500 <= exc.code < 600 and tentativa < max_retries:
+                sleep_fn(backoff)
+                backoff *= 2
+                tentativa += 1
+                continue
+            return None
+        except Exception:
+            if tentativa < max_retries:
+                sleep_fn(backoff)
+                backoff *= 2
+                tentativa += 1
+                continue
+            return None
+        if not body.get("ok"):
+            return None
+        return body.get("ts")
