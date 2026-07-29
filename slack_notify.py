@@ -255,7 +255,7 @@ def precisa_lembrete(row: Mapping[str, Any], ultimo_aviso: Optional[datetime],
     return (agora - ultimo_aviso) >= timedelta(hours=REMINDER_INTERVAL_HORAS)
 
 
-def montar_mensagem_lembrete(row: Mapping[str, Any], agora: Optional[datetime] = None) -> str:
+def montar_mensagem_lembrete(row: Mapping[str, Any], agora: Optional[datetime] = None) -> tuple[str, list[dict]]:
     """Mensagem de insistencia para reclamacao/recontato ainda sem resposta --
     repete periodicamente ate o estado mudar (resposta dada pelo vendedor)."""
     categoria = categorizar(row)
@@ -274,11 +274,29 @@ def montar_mensagem_lembrete(row: Mapping[str, Any], agora: Optional[datetime] =
         linhas.append(prazo)
     if oid:
         linhas.append(f"<https://www.mercadolivre.com.br/vendas/{oid}/detalhe|Pedido {oid} - abrir a venda>")
-    return "\n".join(linhas)
+    
+    texto_fallback = "\n".join(linhas)
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{linhas[0]}*\n*{titulo}* (SKU {sku})\nMotivo: _{motivo}_"}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": "Isso ainda esta aguardando resposta do vendedor -- demora pode penalizar a reputacao no Mercado Livre."}]}
+    ]
+    if prazo:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": prazo}})
+    if oid:
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Abrir Venda", "emoji": True},
+                "url": _link_venda(oid),
+                "action_id": f"btn_open_{oid}"
+            }]
+        })
+    return texto_fallback, blocks
 
 
 def montar_mensagem(row: Mapping[str, Any], saldo: Optional[float] = None,
-                     atualizacao: bool = False, agora: Optional[datetime] = None) -> str:
+                     atualizacao: bool = False, agora: Optional[datetime] = None) -> tuple[str, list[dict]]:
     """Monta o texto final da notificacao do Slack."""
     cabecalho = "🔄 *Atualização de estado*" if atualizacao else "🚨 *Novo processo*"
     categoria = categorizar(row)
@@ -301,7 +319,37 @@ def montar_mensagem(row: Mapping[str, Any], saldo: Optional[float] = None,
         linhas.append(prazo)
     if oid:
         linhas.append(f"➡️ <https://www.mercadolivre.com.br/vendas/{oid}/detalhe|Pedido {oid} — abrir a venda>")
-    return "\n".join(linhas)
+    
+    texto_fallback = "\n".join(linhas)
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"{'🔄 Atualização' if atualizacao else '🚨 Novo processo'} — {categoria}", "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{titulo}*\nSKU: {sku} · Motivo: _{motivo}_"}},
+        {"type": "divider"}
+    ]
+    
+    finance_block = bloco_financeiro(row, saldo)
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": finance_block}})
+    
+    context_elements = []
+    if tracking:
+        context_elements.append({"type": "mrkdwn", "text": tracking})
+    if prazo:
+        context_elements.append({"type": "mrkdwn", "text": prazo})
+    if context_elements:
+        blocks.append({"type": "context", "elements": context_elements})
+
+    if oid:
+        blocks.append({
+            "type": "actions",
+            "elements": [{
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Abrir Venda", "emoji": True},
+                "url": _link_venda(oid),
+                "action_id": f"btn_open_{oid}"
+            }]
+        })
+
+    return texto_fallback, blocks
 
 
 def _fmt_brl(v) -> str:
@@ -367,7 +415,7 @@ def _linha_quadro(row: Mapping[str, Any]) -> str:
     return f"• *{titulo}* (SKU {sku}) · _{motivo}_ · <{_link_venda(oid)}|abrir a venda>"
 
 
-def montar_quadro(rows, data_str: str) -> str:
+def montar_quadro(rows, data_str: str) -> tuple[str, list[dict]]:
     """Monta o 'Quadro do SAC' — visao Kanban do dia. A FAZER e listado (o
     que a Maria precisa AGIR, com CTA); AGUARDANDO e FEITO viram contadores
     (ela nao precisa agir neles). rows = claims abertos + fechados recentes."""
@@ -376,22 +424,82 @@ def montar_quadro(rows, data_str: str) -> str:
         col = classificar_kanban(r)
         (a_fazer if col == "a_fazer" else aguardando if col == "aguardando" else feito).append(r)
 
-    L = [f"🗂️ *Quadro do SAC — {data_str}*", ""]
+    texto_fallback = f"Quadro do SAC — {data_str}: {len(a_fazer)} a fazer, {len(aguardando)} aguardando, {len(feito)} feito."
 
-    L.append(f"🔴 *A FAZER — {len(a_fazer)}*   _responda no ML, o prazo corre_")
-    if a_fazer:
-        L += [_linha_quadro(r) for r in a_fazer]
+    blocks = []
+    blocks.append({
+        "type": "header",
+        "text": {
+            "type": "plain_text",
+            "text": f"🗂️ Quadro do SAC — {data_str}",
+            "emoji": True
+        }
+    })
+    blocks.append({"type": "divider"})
+
+    # A FAZER
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"🔴 *A FAZER — {len(a_fazer)}*\n_responda no ML, o prazo corre_"
+        }
+    })
+
+    if not a_fazer:
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "_Nada pendente da sua parte agora. 👏_"}]
+        })
     else:
-        L.append("_Nada pendente da sua parte agora. 👏_")
-    L.append("")
+        for r in a_fazer:
+            titulo = (r.get("item_title") or "Produto").strip() or "Produto"
+            if len(titulo) > 48:
+                titulo = titulo[:47].rstrip() + "…"
+            sku = r.get("item_sku") or "—"
+            motivo = motivo_humano(r.get("reason_label"))
+            oid = r.get("order_id")
 
-    L.append(f"🟡 *AGUARDANDO — {len(aguardando)}*   "
-             "_o Mercado Livre está arbitrando ou o produto está a caminho; só acompanhar_")
-    L.append("")
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{titulo}*\nSKU: {sku} · Motivo: _{motivo}_"
+                },
+                "accessory": {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Abrir Venda",
+                        "emoji": True
+                    },
+                    "url": _link_venda(oid),
+                    "action_id": f"btn_{oid}"
+                }
+            })
 
-    L.append(f"🟢 *FEITO — {len(feito)}*   "
-             "_casos já encerrados; o balanço em R$ sai no #sac-fechamento_")
-    return "\n".join(L)
+    blocks.append({"type": "divider"})
+
+    # AGUARDANDO
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"🟡 *AGUARDANDO — {len(aguardando)}*\n_o Mercado Livre está arbitrando ou o produto está a caminho; só acompanhar_"
+        }
+    })
+    blocks.append({"type": "divider"})
+
+    # FEITO
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"🟢 *FEITO — {len(feito)}*\n_casos já encerrados; o balanço em R$ sai no #sac-fechamento_"
+        }
+    })
+
+    return texto_fallback, blocks
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +510,7 @@ _DDL_BOARD = """
 CREATE TABLE IF NOT EXISTS slack_board (
     channel TEXT PRIMARY KEY,
     ts TEXT NOT NULL,
+    channel_id TEXT,
     atualizado_em TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 """
@@ -420,13 +529,13 @@ def _save_thread(cur, order_id, channel: str, thread_ts: str) -> None:
     )
 
 
-def enviar_na_venda(cur, canal: str, order_id, texto: str) -> bool:
+def enviar_na_venda(cur, canal: str, order_id, texto: str, blocks: Optional[list] = None) -> bool:
     """Posta agrupado por venda: raiz se a venda ainda nao tem thread,
     resposta na MESMA thread se ja tem -- e assim uma venda vira um card
     so que evolui, em vez de mensagens soltas desconectadas."""
     existente = _get_thread(cur, order_id)
     thread_ts = existente[1] if existente else None
-    ts = slack_client.post_message(canal, texto, thread_ts=thread_ts)
+    ts = slack_client.post_message(canal, texto, thread_ts=thread_ts, blocks=blocks)
     if not ts:
         return False
     if not existente:
@@ -441,9 +550,24 @@ def enviar(canal: str, texto: str) -> bool:
 
 
 def _saldo_do_pedido(cur, order_id) -> Optional[float]:
-    cur.execute("SELECT total FROM meli_page_saldos WHERE order_id = %s", (order_id,))
+    cur.execute("""
+        SELECT m.total, v.mp_valor 
+        FROM meli_page_saldos m
+        LEFT JOIN mp_validation_results v ON v.order_id::text = m.order_id::text
+        WHERE m.order_id = %s
+    """, (order_id,))
     row = cur.fetchone()
-    return float(row[0]) if row and row[0] is not None else None
+    if not row or row[0] is None:
+        return None
+        
+    ml_total = float(row[0])
+    mp_valor = row[1]
+    
+    # R8: Saldo Zero != Zerado. Se o ML diz 0, exigimos que o MP também tenha cruzado.
+    if ml_total == 0.0 and mp_valor is None:
+        return None
+        
+    return ml_total
 
 
 def _chaves_anteriores(cur, claim_id) -> set[str]:
@@ -490,8 +614,8 @@ def notificar_processos(canal: str = CANAL_PADRAO) -> int:
                     if not deve_anunciar(row["claim_status"], atualizacao):
                         continue
                     saldo = _saldo_do_pedido(cur, row["order_id"]) if row["claim_status"] == "closed" else None
-                    texto = montar_mensagem(row, saldo, atualizacao, agora)
-                    if enviar_na_venda(cur, canal, row["order_id"], texto):
+                    texto, blocks = montar_mensagem(row, saldo, atualizacao, agora)
+                    if enviar_na_venda(cur, canal, row["order_id"], texto, blocks=blocks):
                         cur.execute(
                             "INSERT INTO slack_notificados (claim_id, status) VALUES (%s,%s) "
                             "ON CONFLICT DO NOTHING", (row["claim_id"], chave))
@@ -500,8 +624,8 @@ def notificar_processos(canal: str = CANAL_PADRAO) -> int:
                     continue
                 ultimo_aviso = _ultimo_aviso(cur, row["claim_id"])
                 if precisa_lembrete(row, ultimo_aviso, agora):
-                    texto = montar_mensagem_lembrete(row, agora)
-                    if enviar_na_venda(cur, canal, row["order_id"], texto):
+                    texto, blocks = montar_mensagem_lembrete(row, agora)
+                    if enviar_na_venda(cur, canal, row["order_id"], texto, blocks=blocks):
                         marcador = f"lembrete:{agora.isoformat()}"
                         cur.execute(
                             "INSERT INTO slack_notificados (claim_id, status) VALUES (%s,%s) "
@@ -518,18 +642,18 @@ def notificar_processos(canal: str = CANAL_PADRAO) -> int:
     return enviadas
 
 
-def _get_board_ts(cur, canal: str) -> Optional[str]:
-    cur.execute("SELECT ts FROM slack_board WHERE channel = %s", (canal,))
+def _get_board_ts(cur, canal: str) -> Optional[tuple[str, str]]:
+    cur.execute("SELECT ts, channel_id FROM slack_board WHERE channel = %s", (canal,))
     row = cur.fetchone()
-    return row[0] if row else None
+    return (row[0], row[1]) if row else None
 
 
-def _save_board_ts(cur, canal: str, ts: str) -> None:
+def _save_board_ts(cur, canal: str, ts: str, channel_id: str) -> None:
     cur.execute(
-        "INSERT INTO slack_board (channel, ts, atualizado_em) "
-        "VALUES (%s, %s, CURRENT_TIMESTAMP) "
-        "ON CONFLICT (channel) DO UPDATE SET ts=EXCLUDED.ts, atualizado_em=CURRENT_TIMESTAMP",
-        (canal, ts),
+        "INSERT INTO slack_board (channel, ts, channel_id, atualizado_em) "
+        "VALUES (%s, %s, %s, CURRENT_TIMESTAMP) "
+        "ON CONFLICT (channel) DO UPDATE SET ts=EXCLUDED.ts, channel_id=EXCLUDED.channel_id, atualizado_em=CURRENT_TIMESTAMP",
+        (canal, ts, channel_id),
     )
 
 
@@ -542,6 +666,10 @@ def publicar_quadro(canal: str = CANAL_PADRAO) -> bool:
     try:
         with conn.cursor() as cur:
             cur.execute(_DDL_BOARD)
+            try:
+                cur.execute("ALTER TABLE slack_board ADD COLUMN channel_id TEXT")
+            except Exception:
+                pass # ignora se a coluna ja existir
             conn.commit()
         with dict_cursor(conn) as cur:
             cur.execute("""
@@ -557,17 +685,30 @@ def publicar_quadro(canal: str = CANAL_PADRAO) -> bool:
             """)
             rows = cur.fetchall()
         data_str = datetime.now(timezone.utc).strftime("%d/%m")
-        texto = montar_quadro(rows, data_str)
+        texto, blocks = montar_quadro(rows, data_str)
         with conn.cursor() as cur:
-            ts_atual = _get_board_ts(cur, canal)
+            board_data = _get_board_ts(cur, canal)
+        
+        ts_atual = board_data[0] if board_data else None
+        channel_id_atual = board_data[1] if board_data else None
+        
         novo_ts = None
-        if ts_atual:
-            novo_ts = slack_client.update_message(canal, ts_atual, texto)
-        if not novo_ts:  # sem quadro ainda, ou a msg antiga sumiu -> posta novo
-            novo_ts = slack_client.post_message(canal, texto)
-        if novo_ts:
+        novo_channel_id = None
+        
+        if ts_atual and channel_id_atual:
+            novo_ts = slack_client.update_message(channel_id_atual, ts_atual, texto, blocks=blocks)
+            if novo_ts:
+                novo_channel_id = channel_id_atual
+                
+        if not novo_ts:  # sem quadro ainda, ou msg antiga sumiu -> posta novo
+            resp = slack_client.post_message_full(canal, texto, blocks=blocks)
+            if resp:
+                novo_ts = resp.get("ts")
+                novo_channel_id = resp.get("channel")
+                
+        if novo_ts and novo_channel_id:
             with conn.cursor() as cur:
-                _save_board_ts(cur, canal, novo_ts)
+                _save_board_ts(cur, canal, novo_ts, novo_channel_id)
             conn.commit()
             return True
         return False

@@ -43,23 +43,24 @@ def _token() -> Optional[str]:
         return None
 
 
-def post_message(
+def post_message_full(
     channel: str,
     text: str,
     thread_ts: Optional[str] = None,
     *,
+    blocks: Optional[list] = None,
     max_retries: int = 3,
     sleep_fn: Callable[[float], None] = time.sleep,
-) -> Optional[str]:
+) -> Optional[dict]:
     """Envia mensagem (ou resposta em thread, se thread_ts for informado).
-    Retorna o `ts` da mensagem em caso de sucesso, ou None em qualquer
-    falha definitiva -- nunca lanca, para o chamador poder simplesmente
-    re-tentar no proximo ciclo sem tratamento especial.
+    Retorna o dicionario de resposta da API (incluindo 'ts' e 'channel' resolvido).
     """
     tok = _token()
     if not tok:
         return None
     payload: dict = {"channel": channel, "text": text}
+    if blocks:
+        payload["blocks"] = blocks
     if thread_ts:
         payload["thread_ts"] = thread_ts
     headers = {
@@ -103,7 +104,20 @@ def post_message(
         # no corpo e quem manda (ex.: {"ok": false, "error": "channel_not_found"}).
         if not body.get("ok"):
             return None
-        return body.get("ts")
+        return body
+
+def post_message(
+    channel: str,
+    text: str,
+    thread_ts: Optional[str] = None,
+    *,
+    blocks: Optional[list] = None,
+    max_retries: int = 3,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> Optional[str]:
+    """Versao legada para retrocompatibilidade que devolve apenas o ts."""
+    body = post_message_full(channel, text, thread_ts, blocks=blocks, max_retries=max_retries, sleep_fn=sleep_fn)
+    return body.get("ts") if body else None
 
 
 _API_UPDATE = "https://slack.com/api/chat.update"
@@ -114,6 +128,7 @@ def update_message(
     ts: str,
     text: str,
     *,
+    blocks: Optional[list] = None,
     max_retries: int = 3,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> Optional[str]:
@@ -126,6 +141,8 @@ def update_message(
     if not tok:
         return None
     payload = {"channel": channel, "ts": ts, "text": text}
+    if blocks:
+        payload["blocks"] = blocks
     headers = {
         "Content-Type": "application/json; charset=utf-8",
         "Authorization": f"Bearer {tok}",
