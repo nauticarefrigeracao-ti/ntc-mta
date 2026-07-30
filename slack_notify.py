@@ -850,13 +850,20 @@ def resumo_diario(canal: str = CANAL_FECHAMENTO) -> int:
     conn = get_db_connection()
     try:
         with dict_cursor(conn) as cur:
+            # DISTINCT ON: slack_notificados tem PK (claim_id, status), entao
+            # um claim com varios estados 'closed:*' devolvia uma linha por
+            # estado e o caso era somado duas vezes. montar_fechamento ainda
+            # deduplica (defesa em profundidade), mas o dado que entra na
+            # conta ja tem que ser unico na origem.
             cur.execute(
-                "SELECT sn.claim_id, d.order_id, d.item_title, d.item_sku, s.total AS saldo "
+                "SELECT DISTINCT ON (sn.claim_id) "
+                "       sn.claim_id, d.order_id, d.item_title, d.item_sku, s.total AS saldo "
                 "FROM slack_notificados sn "
                 "JOIN ml_devolucoes d ON d.claim_id = sn.claim_id "
                 "LEFT JOIN meli_page_saldos s ON s.order_id = d.order_id "
                 "WHERE sn.status LIKE 'closed:%%' "
-                "  AND sn.avisado_em >= %s AND sn.avisado_em < %s",
+                "  AND sn.avisado_em >= %s AND sn.avisado_em < %s "
+                "ORDER BY sn.claim_id, sn.avisado_em DESC",
                 (ontem_0h, hoje_0h))
             rows = cur.fetchall()
     finally:

@@ -1,0 +1,47 @@
+name: Confianca dos Numeros
+
+# A catraca. Roda a bateria de invariantes contra os dados reais e FALHA
+# quando um numero exibido nao se sustenta -- cobertura de conciliacao que
+# caiu, link apontando para shipment em vez de pedido, caso contado duas
+# vezes. Ausencia de erro nao e mais lida como sucesso.
+#
+# Custo ~zero: e aritmetica sobre dados ja carregados, sem chamada de modelo.
+
+on:
+  schedule:
+    - cron: '0 11 * * *'   # 8h BRT, antes do fechamento diario (12h UTC)
+  push:
+    branches: [main]
+    paths:
+      - 'confianca.py'
+      - 'slack_notify.py'
+      - 'resolver_order.py'
+      - 'src/**'
+  workflow_dispatch:
+
+concurrency:
+  group: confianca-numeros
+  cancel-in-progress: false
+
+jobs:
+  invariantes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Testes (unitarios + integracao)
+        run: python -m pytest tests/ -q
+
+      - name: Bateria de invariantes contra os dados reais
+        env:
+          ML_NEON_URL: ${{ secrets.ML_NEON_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: python confianca.py
