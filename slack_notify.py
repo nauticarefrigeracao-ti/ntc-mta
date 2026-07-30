@@ -502,6 +502,92 @@ def montar_quadro(rows, data_str: str) -> tuple[str, list[dict]]:
 
 
 # ---------------------------------------------------------------------------
+# R7 -- fechamento diario (o placar do chefe) -- funcoes puras
+# ---------------------------------------------------------------------------
+
+CANAL_FECHAMENTO = "#sac-fechamento"
+
+
+def classificar_desfecho(saldo) -> str:
+    """Desfecho financeiro de um caso fechado, do jeito que o chefe le:
+    negativo = prejuizo, zero = a Protecao ao Vendedor cobriu, revertido = o
+    ML indenizou acima do custo. Sem saldo conciliado -> 'pendente': saldo
+    zero nao e a mesma coisa que zerado (R8), entao nao afirmamos nada."""
+    if saldo is None:
+        return "pendente"
+    v = float(saldo)
+    if v < 0:
+        return "negativo"
+    if v > 0:
+        return "revertido"
+    return "zero"
+
+
+def montar_fechamento(rows, data_str: str) -> tuple[str, list[dict]]:
+    """Balanco do dia: quanto fechou negativo/zero/revertido e o saldo.
+
+    rows = casos fechados no dia, cada um com 'saldo' (meli_page_saldos.total),
+    order_id, item_title, item_sku."""
+    grupos: dict[str, list] = {"negativo": [], "zero": [], "revertido": [], "pendente": []}
+    for r in rows:
+        grupos[classificar_desfecho(r.get("saldo"))].append(r)
+
+    negativos = sorted(grupos["negativo"], key=lambda r: float(r["saldo"]))
+    total_prejuizo = sum(float(r["saldo"]) for r in negativos)
+    total_revertido = sum(float(r["saldo"]) for r in grupos["revertido"])
+    saldo_dia = total_prejuizo + total_revertido
+
+    blocks: list[dict] = [{
+        "type": "header",
+        "text": {"type": "plain_text", "text": f"📊 Fechamento do dia — {data_str}", "emoji": True},
+    }]
+
+    if not rows:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                       "text": "Nenhum processo fechou hoje. Dia zerado."}})
+        return f"Fechamento {data_str}: nenhum processo fechado.", blocks
+
+    blocks.append({"type": "section", "fields": [
+        {"type": "mrkdwn", "text": f"*Saldo do dia*\n{_fmt_brl(saldo_dia)}"},
+        {"type": "mrkdwn", "text": f"*Casos fechados*\n{len(rows)}"},
+    ]})
+    blocks.append({"type": "divider"})
+    blocks.append({"type": "section", "fields": [
+        {"type": "mrkdwn",
+         "text": f"🔴 *Prejuízo* — {len(negativos)}\n{_fmt_brl(total_prejuizo)}"},
+        {"type": "mrkdwn",
+         "text": f"⚪ *ML cobriu* — {len(grupos['zero'])}\nsem prejuízo nem ganho"},
+        {"type": "mrkdwn",
+         "text": f"🟢 *Revertido* — {len(grupos['revertido'])}\n+{_fmt_brl(total_revertido)}"},
+    ]})
+
+    if negativos:
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                       "text": "*Onde o dinheiro saiu* (maior primeiro)"}})
+        for r in negativos[:10]:
+            titulo = (r.get("item_title") or "Produto").strip() or "Produto"
+            if len(titulo) > 44:
+                titulo = titulo[:43].rstrip() + "…"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                           "text": (f"*{_fmt_brl(r['saldo'])}* · {titulo} (SKU {r.get('item_sku') or '—'})\n"
+                                    f"{_cta_venda(r.get('order_id'))}")}})
+        if len(negativos) > 10:
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
+                           "text": f"_e mais {len(negativos) - 10} caso(s) — veja tudo no painel_"}]})
+
+    if grupos["pendente"]:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn",
+                       "text": (f"_{len(grupos['pendente'])} caso(s) com conciliação financeira pendente — "
+                                "ainda não entram no saldo._")}]})
+
+    texto = (f"Fechamento {data_str}: saldo {_fmt_brl(saldo_dia)} — "
+             f"{len(negativos)} com prejuízo ({_fmt_brl(total_prejuizo)}), "
+             f"{len(grupos['zero'])} cobertos, {len(grupos['revertido'])} revertidos.")
+    return texto, blocks
+
+
+# ---------------------------------------------------------------------------
 # I/O -- Slack, Neon, CLI
 # ---------------------------------------------------------------------------
 
@@ -542,10 +628,10 @@ def enviar_na_venda(cur, canal: str, order_id, texto: str, blocks: Optional[list
     return True
 
 
-def enviar(canal: str, texto: str) -> bool:
-    """Mensagem avulsa (resumo diario, teste) -- nao esta amarrada a uma
+def enviar(canal: str, texto: str, blocks: Optional[list] = None) -> bool:
+    """Mensagem avulsa (fechamento diario, teste) -- nao esta amarrada a uma
     venda especifica, entao nunca precisa de thread."""
-    return bool(slack_client.post_message(canal, texto))
+    return bool(slack_client.post_message(canal, texto, blocks=blocks))
 
 
 def _saldo_do_pedido(cur, order_id) -> Optional[float]:
@@ -734,12 +820,13 @@ def publicar_quadro(canal: str = CANAL_PADRAO) -> bool:
         conn.close()
 
 
-def resumo_diario(canal: str = CANAL_PADRAO) -> int:
-    """Resumo diario dos processos fechados ONTEM, com prejuizo confirmado.
+def resumo_diario(canal: str = CANAL_FECHAMENTO) -> int:
+    """R7 -- fechamento do dia anterior no canal do chefe.
 
     Roda 1x por dia (cedo da manha) via workflow separado, fechando a
-    contabilidade do dia anterior antes do ciclo normal de --once comecar
-    a acompanhar o dia atual.
+    contabilidade do dia anterior antes do ciclo de --once comecar a
+    acompanhar o dia atual. Vai para #sac-fechamento, nao para o #sac
+    operacional: agir (Maria) e medir (chefe) sao leituras diferentes.
     """
     from src.db.connection import get_db_connection, dict_cursor
     agora = datetime.now(timezone.utc)
@@ -750,25 +837,20 @@ def resumo_diario(canal: str = CANAL_PADRAO) -> int:
     conn = get_db_connection()
     try:
         with dict_cursor(conn) as cur:
-            cur.execute("SELECT sn.claim_id, d.order_id, d.item_title, d.item_sku, s.total AS saldo FROM slack_notificados sn JOIN ml_devolucoes d ON d.claim_id = sn.claim_id LEFT JOIN meli_page_saldos s ON s.order_id = d.order_id WHERE sn.status LIKE 'closed:%%' AND sn.avisado_em >= %s AND sn.avisado_em < %s", (ontem_0h, hoje_0h))
+            cur.execute(
+                "SELECT sn.claim_id, d.order_id, d.item_title, d.item_sku, s.total AS saldo "
+                "FROM slack_notificados sn "
+                "JOIN ml_devolucoes d ON d.claim_id = sn.claim_id "
+                "LEFT JOIN meli_page_saldos s ON s.order_id = d.order_id "
+                "WHERE sn.status LIKE 'closed:%%' "
+                "  AND sn.avisado_em >= %s AND sn.avisado_em < %s",
+                (ontem_0h, hoje_0h))
             rows = cur.fetchall()
     finally:
         conn.close()
 
-    prejuizos = [(r, float(r["saldo"])) for r in rows if r.get("saldo") is not None and float(r["saldo"]) < 0]
-    total = sum(v for _, v in prejuizos)
-
-    if not rows:
-        texto = f":white_check_mark: *Resumo do dia {data_str}*\nNenhum processo fechado ontem — dia zerado."
-    elif not prejuizos:
-        texto = f":white_check_mark: *Resumo do dia {data_str}*\n{len(rows)} processo(s) fechado(s), sem prejuízo — Mercado Livre cobriu ou o resultado ficou positivo."
-    else:
-        linhas = [f":rotating_light: *Resumo do dia {data_str}* — prejuízo confirmado: {_fmt_brl(total)} em {len(prejuizos)} venda(s) (de {len(rows)} processo(s) fechado(s))"]
-        for r, v in prejuizos[:15]:
-            linhas.append(f"• Pedido {r['order_id']} — {r.get('item_title') or 'Produto'} — {_fmt_brl(v)}")
-        texto = "\n".join(linhas)
-
-    return 1 if enviar(canal, texto) else 0
+    texto, blocks = montar_fechamento(rows, data_str)
+    return 1 if enviar(canal, texto, blocks=blocks) else 0
 
 
 def teste(canal: str = CANAL_PADRAO) -> None:
@@ -809,11 +891,14 @@ def main() -> None:
         print("✓ quadro atualizado" if ok else "quadro: FALHOU", file=sys.stderr if not ok else None)
         sys.exit(0 if ok else 1)
     if args.resumo:
-        n = resumo_diario(args.canal)
+        # o fechamento tem canal proprio (o placar do chefe); so respeita
+        # --canal se foi passado explicitamente.
+        canal_fech = args.canal if args.canal != CANAL_PADRAO else CANAL_FECHAMENTO
+        n = resumo_diario(canal_fech)
         if not n:
-            print("resumo diário: FALHOU ao enviar", file=sys.stderr)
+            print(f"fechamento diário: FALHOU ao enviar em {canal_fech}", file=sys.stderr)
             sys.exit(1)
-        print("✓ resumo diário enviado")
+        print(f"✓ fechamento diário enviado em {canal_fech}")
         return
     if args.once or not args.test:
         tentadas, enviadas = notificar_processos(args.canal)
