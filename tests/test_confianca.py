@@ -65,7 +65,7 @@ def test_todos_order_ids_reais_nao_gera_achado():
     assert checar_order_ids_reais([2000012345678901, 2000012345678902]) is None
 
 
-def test_order_id_curto_e_shipment_e_gera_quebra():
+def test_order_id_de_11_digitos_e_shipment_e_gera_quebra():
     a = checar_order_ids_reais([2000012345678901, 47536582431])
     assert a is not None and a.severidade == "quebra"
     assert "1" in a.evidencia
@@ -73,6 +73,37 @@ def test_order_id_curto_e_shipment_e_gera_quebra():
 
 def test_lista_vazia_nao_gera_achado():
     assert checar_order_ids_reais([]) is None
+
+
+# --- formato do order_id: medido na API, nao suposto -----------------------
+# A primeira versao usava "< 15 digitos = shipment" e estava ERRADA. Medicao
+# na API do ML (30/07/2026):
+#   10 digitos (5.099) -> PEDIDO antigo legitimo   (6/6 abrem em /orders/)
+#   11 digitos (2.922) -> SHIPMENT                 (8/8 em /shipments/)
+#   16 digitos (10.092, 2000…) -> pedido novo
+# O shipment de 11 digitos resolve para um order de 10 -- ou seja, a regra
+# antiga acusaria o RESULTADO da propria correcao como defeito, para sempre.
+
+def test_pedido_antigo_de_10_digitos_nao_e_acusado():
+    # 5.462.527.754 abre em /orders/ (status=cancelled, "Cj 4 Pé Nivelador")
+    assert checar_order_ids_reais([5462527754]) is None
+
+
+def test_pedido_antigo_e_novo_convivem_sem_achado():
+    assert checar_order_ids_reais([5462527754, 2000012345678901]) is None
+
+
+def test_resultado_da_resolucao_nao_vira_novo_achado():
+    """Regressao: resolver 11 digitos gera order de 10. Se 10 fosse acusado,
+    o CI ficaria vermelho para sempre depois de uma correcao BEM-SUCEDIDA."""
+    resolvido = 4351746836  # veio de /shipments/40388797435
+    assert checar_order_ids_reais([resolvido]) is None
+
+
+def test_id_curto_demais_ainda_e_suspeito():
+    # nem pedido (10/16) nem shipment (11) -- nao abre link nenhum
+    a = checar_order_ids_reais([12345])
+    assert a is not None and a.severidade == "quebra"
 
 
 # --- duplicatas ------------------------------------------------------------

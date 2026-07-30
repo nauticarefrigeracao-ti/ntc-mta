@@ -24,9 +24,18 @@ import sys
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
-# Pedido do ML tem 15+ digitos; abaixo disso e shipment id (gera link 404 e
-# nao casa com meli_page_saldos).
-DIGITOS_ORDER_REAL = 15
+# Formato do order_id do ML -- MEDIDO na API em 30/07/2026, nao suposto:
+#   10 digitos (5.099 casos) -> PEDIDO antigo legitimo  (6/6 abrem /orders/)
+#   11 digitos (2.922 casos) -> SHIPMENT                (8/8 em /shipments/)
+#   16 digitos (10.092, 2000…) -> pedido novo
+#
+# A primeira versao usava "< 15 digitos = shipment" e estava errada: acusava
+# 5.099 pedidos validos. Pior, um shipment de 11 digitos resolve para um order
+# de 10 -- entao a regra antiga acusaria o RESULTADO da propria correcao como
+# defeito, e o CI ficaria vermelho para sempre depois de um conserto bem
+# sucedido.
+DIGITOS_SHIPMENT = 11
+DIGITOS_ORDER_VALIDOS = (10, 16)
 # Abaixo disto uma variacao de cobertura e ruido de arredondamento, nao queda.
 TOLERANCIA_COBERTURA = 0.5
 
@@ -77,19 +86,38 @@ def checar_cobertura_nao_caiu(atual: float, anterior: Optional[float]) -> Option
 # --- invariantes de dado ---------------------------------------------------
 
 def checar_order_ids_reais(order_ids: Iterable) -> Optional[Achado]:
-    """R1 do chefe: todo link tem que abrir a venda certa. order_id curto e
-    shipment -- da 404 e nao casa com o saldo."""
-    curtos = [o for o in order_ids
-              if o is not None and len(str(o).strip()) < DIGITOS_ORDER_REAL]
-    if not curtos:
+    """R1 do chefe: todo link tem que abrir a venda certa.
+
+    Um shipment gravado no lugar do pedido da 404 para a Maria e nunca casa
+    com meli_page_saldos (chaveado por order_id). Ver DIGITOS_SHIPMENT para a
+    medicao que define o formato -- pedido antigo (10) e novo (16) sao ambos
+    validos e NAO podem ser acusados."""
+    suspeitos = [o for o in order_ids
+                 if o is not None
+                 and len(str(o).strip()) not in DIGITOS_ORDER_VALIDOS]
+    if not suspeitos:
         return None
+    shipments = [o for o in suspeitos
+                 if len(str(o).strip()) == DIGITOS_SHIPMENT]
+    if shipments:
+        return Achado(
+            invariante="order_id_real",
+            severidade="quebra",
+            resumo="Há links apontando para shipment, não para o pedido",
+            evidencia=f"{len(shipments)} caso(s) com shipment gravado como "
+                      f"order_id (ex.: {shipments[0]})",
+            acao=("Rode `python resolver_order.py` para converter "
+                  "shipment→order. Esses casos dão 404 para a Maria e ficam "
+                  "fora do saldo."),
+        )
     return Achado(
         invariante="order_id_real",
         severidade="quebra",
-        resumo="Há links apontando para shipment, não para o pedido",
-        evidencia=f"{len(curtos)} caso(s) com order_id curto (ex.: {curtos[0]})",
-        acao=("Rode `python resolver_order.py` para converter shipment→order. "
-              "Esses casos dão 404 para a Maria e ficam fora do saldo."),
+        resumo="Há order_id em formato desconhecido",
+        evidencia=f"{len(suspeitos)} caso(s) fora dos formatos conhecidos "
+                  f"(ex.: {suspeitos[0]})",
+        acao=("Nem pedido (10 ou 16 dígitos) nem shipment (11). Verifique a "
+              "origem antes de confiar no link."),
     )
 
 
@@ -169,14 +197,17 @@ def rodar_bateria() -> tuple[float, list[Achado]]:
             """)
             conn.commit()
 
-            # cobertura: fechados com order real que ja viraram R$
+            # cobertura: fechados com order VALIDO (antigo ou novo) que ja
+            # viraram R$. Antes o filtro era ">= 15 digitos", que jogava fora
+            # os 5.099 pedidos antigos de 10 digitos -- a cobertura era medida
+            # sobre um universo menor do que o real.
             cur.execute("""
                 SELECT COUNT(*), COUNT(s.order_id)
                 FROM ml_devolucoes d
                 LEFT JOIN meli_page_saldos s ON s.order_id = d.order_id
                 WHERE d.claim_status = 'closed'
-                  AND LENGTH(d.order_id::text) >= %s
-            """, (DIGITOS_ORDER_REAL,))
+                  AND LENGTH(d.order_id::text) = ANY(%s)
+            """, (list(DIGITOS_ORDER_VALIDOS),))
             total, conciliados = cur.fetchone()
             cobertura = cobertura_conciliacao(total or 0, conciliados or 0)
 

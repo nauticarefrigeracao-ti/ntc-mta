@@ -18,8 +18,29 @@ from typing import Optional
 
 from src.api import ml_client
 
-# Pedido do ML tem 15+ digitos (padrao 2000...). Abaixo disso e shipment.
-DIGITOS_ORDER_REAL = 15
+# Formato do order_id do ML -- MEDIDO na API em 30/07/2026, nao suposto:
+#   10 digitos (5.099) -> PEDIDO antigo legitimo  (6/6 abrem em /orders/)
+#   11 digitos (2.922) -> SHIPMENT                (8/8 em /shipments/)
+#   16 digitos (10.092, 2000…) -> pedido novo
+#
+# A primeira versao usava "< 15 digitos = shipment": teria tentado resolver
+# 5.099 pedidos VALIDOS. Nada foi corrompido porque resolver_order_id so grava
+# quando a API devolve um order plausivel, e esses dao 404 em /shipments --
+# mas era desperdicio de chamada e, na invariante, falso-positivo eterno
+# (o shipment de 11 resolve para um order de 10).
+DIGITOS_SHIPMENT = 11
+# Tamanhos de order_id que o ML de fato usa (antigo e novo).
+DIGITOS_ORDER_VALIDOS = (10, 16)
+
+
+def parece_order_valido(valor) -> bool:
+    """True se o valor tem cara de pedido do ML. Usado para NAO aceitar
+    qualquer coisa que a API devolva -- trocar um link quebrado por outro
+    link quebrado nao seria correcao."""
+    if valor is None:
+        return False
+    texto = str(valor).strip()
+    return texto.isdigit() and len(texto) in DIGITOS_ORDER_VALIDOS
 
 
 def parece_shipment(valor) -> bool:
@@ -29,7 +50,7 @@ def parece_shipment(valor) -> bool:
     texto = str(valor).strip()
     if not texto.isdigit():
         return False
-    return len(texto) < DIGITOS_ORDER_REAL
+    return len(texto) == DIGITOS_SHIPMENT
 
 
 def resolver_order_id(valor) -> Optional[int]:
@@ -42,7 +63,7 @@ def resolver_order_id(valor) -> Optional[int]:
     if not envio:
         return None
     oid = envio.get("order_id")
-    if oid is None or parece_shipment(oid):
+    if not parece_order_valido(oid):
         return None
     return int(oid)
 
@@ -74,9 +95,9 @@ def main() -> int:
             cur.execute(
                 "SELECT claim_id, order_id FROM ml_devolucoes "
                 "WHERE order_id IS NOT NULL "
-                "  AND LENGTH(order_id::text) < %s "
+                "  AND LENGTH(order_id::text) = %s "
                 "ORDER BY date_updated DESC NULLS LAST LIMIT %s",
-                (DIGITOS_ORDER_REAL, args.limite))
+                (DIGITOS_SHIPMENT, args.limite))
             alvos = cur.fetchall()
 
         print(f"claims com shipment gravado como order_id: {len(alvos)}")

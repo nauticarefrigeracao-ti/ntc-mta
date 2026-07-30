@@ -35,8 +35,22 @@ def test_id_de_16_digitos_e_pedido_real():
     assert parece_shipment(2000012345678901) is False
 
 
-def test_id_curto_e_shipment():
+def test_id_de_11_digitos_e_shipment():
     assert parece_shipment(47536582431) is True
+
+
+def test_pedido_antigo_de_10_digitos_nao_e_shipment():
+    """Medido na API: 5.462.527.754 abre em /orders/ (status=cancelled).
+    Tratar 10 digitos como shipment gastaria 5.099 chamadas a toa e, na
+    invariante, acusaria pedido valido."""
+    assert parece_shipment(5462527754) is False
+
+
+def test_order_resolvido_de_shipment_nao_vira_shipment_de_novo():
+    """/shipments/40388797435 -> order 4351746836 (10 digitos). Se 10 fosse
+    shipment, o resolver entraria em loop tentando reresolver o que acabou
+    de consertar."""
+    assert parece_shipment(4351746836) is False
 
 
 def test_id_ausente_nao_e_shipment():
@@ -47,6 +61,7 @@ def test_id_ausente_nao_e_shipment():
 def test_id_como_texto_tambem_e_avaliado():
     assert parece_shipment("47536582431") is True
     assert parece_shipment("2000012345678901") is False
+    assert parece_shipment("5462527754") is False
 
 
 def test_resolve_shipment_para_order_do_pedido():
