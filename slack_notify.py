@@ -283,15 +283,7 @@ def montar_mensagem_lembrete(row: Mapping[str, Any], agora: Optional[datetime] =
     if prazo:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": prazo}})
     if oid:
-        blocks.append({
-            "type": "actions",
-            "elements": [{
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Abrir Venda", "emoji": True},
-                "url": _link_venda(oid),
-                "action_id": f"btn_open_{oid}"
-            }]
-        })
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _cta_venda(oid)}})
     return texto_fallback, blocks
 
 
@@ -339,15 +331,7 @@ def montar_mensagem(row: Mapping[str, Any], saldo: Optional[float] = None,
         blocks.append({"type": "context", "elements": context_elements})
 
     if oid:
-        blocks.append({
-            "type": "actions",
-            "elements": [{
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Abrir Venda", "emoji": True},
-                "url": _link_venda(oid),
-                "action_id": f"btn_open_{oid}"
-            }]
-        })
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": _cta_venda(oid)}})
 
     return texto_fallback, blocks
 
@@ -402,6 +386,17 @@ def classificar_kanban(row: Mapping[str, Any]) -> str:
 
 def _link_venda(oid) -> str:
     return f"https://www.mercadolivre.com.br/vendas/{oid}/detalhe"
+
+
+def _cta_venda(oid) -> str:
+    """CTA como link mrkdwn, nunca como botao.
+
+    Botao do Block Kit -- mesmo url-only -- faz o Slack mandar um payload
+    block_actions pro app; sem Interactivity URL configurada (exige servidor
+    sempre-ligado, e isto roda em cron) o Slack estampa "app nao configurado
+    para respostas interativas" ao lado do CTA. Link mrkdwn tem o mesmo
+    destino sem interacao nenhuma."""
+    return f"➡️ <{_link_venda(oid)}|Abrir a venda {oid} no Mercado Livre>"
 
 
 def _linha_quadro(row: Mapping[str, Any]) -> str:
@@ -464,17 +459,8 @@ def montar_quadro(rows, data_str: str) -> tuple[str, list[dict]]:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*{titulo}*\nSKU: {sku} · Motivo: _{motivo}_"
-                },
-                "accessory": {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "Abrir Venda",
-                        "emoji": True
-                    },
-                    "url": _link_venda(oid),
-                    "action_id": f"btn_{oid}"
+                    "text": (f"*{titulo}*\nSKU: {sku} · Motivo: _{motivo}_\n"
+                             f"{_cta_venda(oid)}")
                 }
             })
 

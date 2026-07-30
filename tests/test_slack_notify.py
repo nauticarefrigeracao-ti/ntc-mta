@@ -243,24 +243,24 @@ def test_eh_atualizacao_quando_ja_notificou_antes():
 # --- montar_mensagem (integracao das funcoes puras) ------------------------
 
 def test_montar_mensagem_novo_processo_tem_cabecalho_correto():
-    texto = montar_mensagem(_row())
+    texto, _ = montar_mensagem(_row())
     assert "Novo processo" in texto
 
 
 def test_montar_mensagem_atualizacao_tem_cabecalho_correto():
-    texto = montar_mensagem(_row(), atualizacao=True)
+    texto, _ = montar_mensagem(_row(), atualizacao=True)
     assert "Atualização de estado" in texto
 
 
 def test_montar_mensagem_inclui_categoria_motivo_e_valor():
-    texto = montar_mensagem(_row())
+    texto, _ = montar_mensagem(_row())
     assert "Reclamação direta" in texto
     assert "O comprador se arrependeu" in texto
     assert "1.380,97" in texto
 
 
 def test_montar_mensagem_inclui_link_do_pedido():
-    texto = montar_mensagem(_row(order_id=2000012345678))
+    texto, _ = montar_mensagem(_row(order_id=2000012345678))
     assert "2000012345678" in texto
 
 
@@ -268,7 +268,7 @@ def test_montar_mensagem_devolucao_fechada_inclui_tracking_e_saldo():
     row = _row(claim_type="returns", claim_stage="none", claim_status="closed",
                return_id=55, return_tracking_status="delivered",
                return_tracking_number="BR999")
-    texto = montar_mensagem(row, saldo=-50.0)
+    texto, _ = montar_mensagem(row, saldo=-50.0)
     assert "Entregue" in texto
     assert "BR999" in texto
     assert "prejuizo confirmado" in texto.lower().replace("í", "i")
@@ -306,12 +306,12 @@ def test_lembra_apos_intervalo_para_recontato():
 
 
 def test_mensagem_lembrete_indica_ainda_sem_resposta():
-    texto = montar_mensagem_lembrete(_row())
+    texto, _ = montar_mensagem_lembrete(_row())
     assert "sem resposta" in texto.lower()
 
 
 def test_mensagem_lembrete_inclui_sku_e_pedido():
-    texto = montar_mensagem_lembrete(_row(item_sku="A12538601", order_id=2000012345678))
+    texto, _ = montar_mensagem_lembrete(_row(item_sku="A12538601", order_id=2000012345678))
     assert "A12538601" in texto
     assert "2000012345678" in texto
 
@@ -393,6 +393,12 @@ def _krow(**over):
     return base
 
 
+def _blocks_str(blocks) -> str:
+    """Serializa os blocks pra assert de conteudo (texto + urls dos botoes)."""
+    import json
+    return json.dumps(blocks, ensure_ascii=False)
+
+
 def test_quadro_conta_as_tres_colunas():
     rows = [
         _krow(claim_stage="claim"),                 # a_fazer
@@ -400,25 +406,75 @@ def test_quadro_conta_as_tres_colunas():
         _krow(claim_stage="dispute"),               # aguardando
         _krow(claim_status="closed"),               # feito
     ]
-    texto = montar_quadro(rows, "28/07")
-    assert "A FAZER — 2" in texto
-    assert "AGUARDANDO — 1" in texto
-    assert "FEITO — 1" in texto
+    texto, blocks = montar_quadro(rows, "28/07")
+    corpo = _blocks_str(blocks)
+    assert "A FAZER — 2" in corpo
+    assert "AGUARDANDO — 1" in corpo
+    assert "FEITO — 1" in corpo
+    # fallback (notificacao do celular) tambem carrega os numeros
+    assert "2 a fazer" in texto and "1 aguardando" in texto and "1 feito" in texto
 
 
 def test_quadro_lista_cta_dos_a_fazer_com_link_e_sku():
-    texto = montar_quadro([_krow(item_sku="NR5461", order_id=999)], "28/07")
-    assert "NR5461" in texto
-    assert "mercadolivre.com.br/vendas/999/detalhe" in texto
+    _, blocks = montar_quadro([_krow(item_sku="NR5461", order_id=999)], "28/07")
+    corpo = _blocks_str(blocks)
+    assert "NR5461" in corpo
+    assert "mercadolivre.com.br/vendas/999/detalhe" in corpo
 
 
 def test_quadro_traduz_codigo_de_motivo_no_a_fazer():
-    texto = montar_quadro([_krow(reason_label="PNR3837")], "28/07")
-    assert "Produto não recebido" in texto
-    assert "PNR3837" not in texto
+    _, blocks = montar_quadro([_krow(reason_label="PNR3837")], "28/07")
+    corpo = _blocks_str(blocks)
+    assert "Produto não recebido" in corpo
+    assert "PNR3837" not in corpo
 
 
 def test_quadro_sem_a_fazer_mostra_parabens():
-    texto = montar_quadro([_krow(claim_stage="dispute")], "28/07")
-    assert "A FAZER — 0" in texto
-    assert "Nada pendente" in texto
+    _, blocks = montar_quadro([_krow(claim_stage="dispute")], "28/07")
+    corpo = _blocks_str(blocks)
+    assert "A FAZER — 0" in corpo
+    assert "Nada pendente" in corpo
+
+
+def test_quadro_cta_aponta_pro_order_id_real():
+    """R1: cada CTA leva ao pedido certo (link testado, nao 404)."""
+    _, blocks = montar_quadro([_krow(order_id=2000012345678)], "28/07")
+    assert "https://www.mercadolivre.com.br/vendas/2000012345678/detalhe" in _blocks_str(blocks)
+
+
+def _tem_botao(blocks) -> bool:
+    for b in blocks:
+        if b.get("type") == "actions":
+            return True
+        if (b.get("accessory") or {}).get("type") == "button":
+            return True
+    return False
+
+
+def test_quadro_nao_usa_botao_interativo():
+    """Botao (mesmo url-only) dispara block_actions -> Slack exige Interactivity
+    URL, que exige servidor sempre-ligado. Nao temos (roda em cron). Sem isso o
+    Slack estampa "app nao configurado para respostas interativas" ao lado do
+    CTA. CTA e link mrkdwn: zero interacao, zero aviso, mesmo destino."""
+    _, blocks = montar_quadro([_krow()], "28/07")
+    assert not _tem_botao(blocks)
+
+
+def test_mensagem_nao_usa_botao_interativo():
+    _, blocks = montar_mensagem(_row())
+    assert not _tem_botao(blocks)
+
+
+def test_lembrete_nao_usa_botao_interativo():
+    _, blocks = montar_mensagem_lembrete(_row())
+    assert not _tem_botao(blocks)
+
+
+def test_mensagem_blocks_tem_link_da_venda():
+    _, blocks = montar_mensagem(_row(order_id=2000012345678))
+    assert "vendas/2000012345678/detalhe" in _blocks_str(blocks)
+
+
+def test_lembrete_blocks_tem_link_da_venda():
+    _, blocks = montar_mensagem_lembrete(_row(order_id=2000012345678))
+    assert "vendas/2000012345678/detalhe" in _blocks_str(blocks)

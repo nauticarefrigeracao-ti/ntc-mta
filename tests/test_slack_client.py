@@ -177,3 +177,58 @@ def test_erro_de_rede_tambem_faz_retry_com_backoff():
             r = slack_client.post_message("#sac", "oi", sleep_fn=esperas.append)
     assert r == "ts-ok"
     assert esperas == [0.5]
+
+
+# --- update_message ------
+
+def test_update_sucesso_retorna_ts():
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen", return_value=_fake_response({"ok": True, "ts": "1234.5678"})):
+            assert slack_client.update_message("C123456", "1234.5678", "texto atualizado") == "1234.5678"
+
+
+def test_update_channel_not_found_retorna_none():
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen", return_value=_fake_response(
+            {"ok": False, "error": "channel_not_found"}
+        )):
+            assert slack_client.update_message("C999", "1234.5678", "texto") is None
+
+
+def test_update_message_not_found_retorna_none():
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen", return_value=_fake_response(
+            {"ok": False, "error": "message_not_found"}
+        )):
+            assert slack_client.update_message("C123", "999.999", "texto") is None
+
+
+def test_update_payload_contem_ts_e_channel_corretos():
+    captured = {}
+
+    def fake_urlopen(req, timeout=15):
+        captured["body"] = json.loads(req.data)
+        return _fake_response({"ok": True, "ts": "1"})
+
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            slack_client.update_message("C123456", "1234.5678", "novo texto")
+    assert captured["body"]["channel"] == "C123456"
+    assert captured["body"]["ts"] == "1234.5678"
+    assert captured["body"]["text"] == "novo texto"
+
+
+def test_update_429_retry_after():
+    chamadas, esperas = [], []
+
+    def fake_urlopen(req, timeout=15):
+        chamadas.append(1)
+        if len(chamadas) == 1:
+            raise _http_error(429, {"Retry-After": "1"})
+        return _fake_response({"ok": True, "ts": "1234.5678"})
+
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            r = slack_client.update_message("C123", "1234.5678", "texto", sleep_fn=esperas.append)
+    assert r == "1234.5678"
+    assert esperas == [1.0]

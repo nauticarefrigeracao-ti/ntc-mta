@@ -178,5 +178,8 @@ def update_message(
                 continue
             return None
         if not body.get("ok"):
+            error_msg = body.get("error", "unknown")
+            import sys
+            print(f"[chat.update FALHOU] channel={channel}, ts={ts}, error={error_msg}, body={body}", file=sys.stderr)
             return None
         return body.get("ts")
