@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
-import urllib.request
 import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -118,6 +120,77 @@ def post_message(
     """Versao legada para retrocompatibilidade que devolve apenas o ts."""
     body = post_message_full(channel, text, thread_ts, blocks=blocks, max_retries=max_retries, sleep_fn=sleep_fn)
     return body.get("ts") if body else None
+
+
+def _api(metodo: str, payload: Optional[dict] = None, *, get: bool = False) -> Optional[dict]:
+    """Chamada generica a Web API. Devolve o corpo em sucesso, None em falha
+    (logando o `error` do Slack em stderr -- falha silenciosa aqui ja custou
+    4 dias de canal mudo). Nunca levanta."""
+    tok = _token()
+    if not tok:
+        return None
+    headers = {"Authorization": f"Bearer {tok}"}
+    if get:
+        qs = urllib.parse.urlencode(payload or {})
+        req = urllib.request.Request(f"https://slack.com/api/{metodo}?{qs}", headers=headers)
+    else:
+        headers["Content-Type"] = "application/json; charset=utf-8"
+        req = urllib.request.Request(f"https://slack.com/api/{metodo}",
+                                     data=json.dumps(payload or {}).encode("utf-8"),
+                                     headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read())
+    except Exception as exc:
+        print(f"[slack {metodo}] erro de rede: {type(exc).__name__}", file=sys.stderr)
+        return None
+    if not body.get("ok"):
+        print(f"[slack {metodo}] error={body.get('error')}", file=sys.stderr)
+        return None
+    return body
+
+
+def listar_canais() -> Optional[dict]:
+    """{nome: id} dos canais publicos. None se faltar permissao -- distinguir
+    "nao existe" de "nao consigo ver" evita criar canal duplicado."""
+    canais, cursor = {}, ""
+    while True:
+        params = {"limit": 200, "exclude_archived": "true", "types": "public_channel"}
+        if cursor:
+            params["cursor"] = cursor
+        body = _api("conversations.list", params, get=True)
+        if body is None:
+            return None
+        for c in body.get("channels", []):
+            canais[c["name"]] = c["id"]
+        cursor = (body.get("response_metadata") or {}).get("next_cursor") or ""
+        if not cursor:
+            return canais
+
+
+def criar_canal(nome: str) -> Optional[str]:
+    body = _api("conversations.create", {"name": nome, "is_private": False})
+    return body.get("channel", {}).get("id") if body else None
+
+
+def entrar_no_canal(channel_id: str) -> bool:
+    return _api("conversations.join", {"channel": channel_id}) is not None
+
+
+def garantir_canal(nome: str) -> Optional[str]:
+    """Devolve o id do canal, criando-o se preciso, e garante o bot dentro.
+
+    Sem isto o fechamento diario dependia de alguem lembrar de criar o canal
+    e rodar /invite -- e a falha aparecia so como "nao enviou"."""
+    nome = nome.lstrip("#")
+    canais = listar_canais()
+    if canais is None:
+        return None
+    cid = canais.get(nome) or criar_canal(nome)
+    if not cid:
+        return None
+    entrar_no_canal(cid)
+    return cid
 
 
 _API_UPDATE = "https://slack.com/api/chat.update"

@@ -1,4 +1,4 @@
-name: Resumo Diario do SAC
+name: Fechamento Diario do SAC
 
 on:
   schedule:
@@ -23,7 +23,7 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
-      - name: Resumo diario de prejuizos (dia anterior) no #sac
+      - name: Fechamento do dia anterior no #sac-fechamento
         env:
           ML_NEON_URL: ${{ secrets.ML_NEON_URL }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

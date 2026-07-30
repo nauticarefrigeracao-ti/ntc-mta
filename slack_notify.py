@@ -850,7 +850,10 @@ def resumo_diario(canal: str = CANAL_FECHAMENTO) -> int:
         conn.close()
 
     texto, blocks = montar_fechamento(rows, data_str)
-    return 1 if enviar(canal, texto, blocks=blocks) else 0
+    # cria o canal e entra nele se preciso; se faltar permissao, garantir_canal
+    # devolve None e seguimos pelo nome (funciona se alguem ja convidou o bot).
+    destino = slack_client.garantir_canal(canal) or canal
+    return 1 if enviar(destino, texto, blocks=blocks) else 0
 
 
 def teste(canal: str = CANAL_PADRAO) -> None:
