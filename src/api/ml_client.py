@@ -76,6 +76,21 @@ def _fetch_token_from_neon(neon_url: str) -> str:
         return ""
 
 
+def _secret(nome: str) -> str:
+    """Le st.secrets[nome] sem nunca levantar.
+
+    Sem secrets.toml (GitHub Actions) qualquer acesso a st.secrets levanta
+    "No secrets found". Como a leitura era `st.secrets.get(x) or os.environ...`,
+    a excecao acontecia antes do fallback e a env var nunca era lida -- token
+    vazio, sync inteiro em 401/403. Por isso o env vem primeiro e o acesso a
+    st.secrets fica isolado aqui."""
+    try:
+        import streamlit as st
+        return st.secrets.get(nome) or ""
+    except Exception:
+        return ""
+
+
 def _token() -> str:
     """Return current ML access token. Priority: Neon DB → st.secrets → env var.
     Result is cached for 5h to avoid repeated Neon roundtrips during bulk sync.
@@ -88,27 +103,19 @@ def _token() -> str:
     tok = ""
 
     # 1. Neon PostgreSQL (auto-rotated tokens — always freshest)
-    try:
-        import streamlit as st
-        neon_url = st.secrets.get("ML_NEON_URL") or os.environ.get("ML_NEON_URL", "")
-        if neon_url:
-            tok = _fetch_token_from_neon(neon_url)
-            if tok:
-                _log.info("ml_client: token fonte=Neon")
-        else:
-            _log.warning("ml_client: ML_NEON_URL não configurado")
-    except Exception as exc:
-        _log.warning("ml_client: erro ao ler ML_NEON_URL: %s", exc)
+    neon_url = os.environ.get("ML_NEON_URL", "") or _secret("ML_NEON_URL")
+    if neon_url:
+        tok = _fetch_token_from_neon(neon_url)
+        if tok:
+            _log.info("ml_client: token fonte=Neon")
+    else:
+        _log.warning("ml_client: ML_NEON_URL não configurado")
 
     # 2. Static secret fallback
     if not tok:
-        try:
-            import streamlit as st
-            tok = st.secrets.get("ML_ACCESS_TOKEN") or ""
-            if tok:
-                _log.info("ml_client: token fonte=st.secrets[ML_ACCESS_TOKEN]")
-        except Exception:
-            pass
+        tok = _secret("ML_ACCESS_TOKEN")
+        if tok:
+            _log.info("ml_client: token fonte=st.secrets[ML_ACCESS_TOKEN]")
 
     # 3. Env var fallback (local dev)
     if not tok:
