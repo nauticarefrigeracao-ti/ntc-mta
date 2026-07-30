@@ -222,6 +222,19 @@ def eh_atualizacao(chaves_anteriores: set[str]) -> bool:
     return len(chaves_anteriores) > 0
 
 
+def status_saida(tentadas: int, enviadas: int) -> int:
+    """Codigo de saida do processo: 0 = ok, 1 = falhou (FAIL-LOUD).
+
+    O bot saiu de #sac uma vez (not_in_channel): chat.postMessage passou a
+    devolver ok:false, o notificador contou 0 enviadas e saiu com 0 -- o
+    GitHub Actions ficou VERDE por 4 dias enquanto a Maria nao recebia nada.
+    Qualquer mensagem que devia sair e nao saiu derruba o run, para o alerta
+    do Actions chegar em vez do silencio."""
+    if tentadas == 0:
+        return 0
+    return 0 if enviadas >= tentadas else 1
+
+
 def deve_anunciar(claim_status: str, ja_notificado_antes: bool) -> bool:
     """R4 (pedido do chefe): NAO anunciar no canal operacional um caso que ja
     nasce FECHADO e nunca foi notificado antes. Isso e um caso do PASSADO (ja
@@ -567,10 +580,14 @@ def _ultimo_aviso(cur, claim_id) -> Optional[datetime]:
     return row[0] if row and row[0] is not None else None
 
 
-def notificar_processos(canal: str = CANAL_PADRAO) -> int:
-    """Processos novos, com mudanca de estado, ou ainda sem resposta (lembrete) -> #sac."""
+def notificar_processos(canal: str = CANAL_PADRAO) -> tuple[int, int]:
+    """Processos novos, com mudanca de estado, ou ainda sem resposta (lembrete) -> #sac.
+
+    Devolve (tentadas, enviadas). A diferenca entre os dois e o que faz o run
+    falhar alto (ver status_saida) em vez de passar como verde silencioso."""
     from src.db.connection import get_db_connection, dict_cursor
     conn = get_db_connection()
+    tentadas = 0
     enviadas = 0
     try:
         with conn.cursor() as cur:
@@ -601,16 +618,21 @@ def notificar_processos(canal: str = CANAL_PADRAO) -> int:
                         continue
                     saldo = _saldo_do_pedido(cur, row["order_id"]) if row["claim_status"] == "closed" else None
                     texto, blocks = montar_mensagem(row, saldo, atualizacao, agora)
+                    tentadas += 1
                     if enviar_na_venda(cur, canal, row["order_id"], texto, blocks=blocks):
                         cur.execute(
                             "INSERT INTO slack_notificados (claim_id, status) VALUES (%s,%s) "
                             "ON CONFLICT DO NOTHING", (row["claim_id"], chave))
                         conn.commit()
                         enviadas += 1
+                    else:
+                        print(f"slack: FALHOU ao notificar claim {row['claim_id']} "
+                              f"(pedido {row['order_id']}) em {canal}", file=sys.stderr)
                     continue
                 ultimo_aviso = _ultimo_aviso(cur, row["claim_id"])
                 if precisa_lembrete(row, ultimo_aviso, agora):
                     texto, blocks = montar_mensagem_lembrete(row, agora)
+                    tentadas += 1
                     if enviar_na_venda(cur, canal, row["order_id"], texto, blocks=blocks):
                         marcador = f"lembrete:{agora.isoformat()}"
                         cur.execute(
@@ -618,14 +640,24 @@ def notificar_processos(canal: str = CANAL_PADRAO) -> int:
                             "ON CONFLICT DO NOTHING", (row["claim_id"], marcador))
                         conn.commit()
                         enviadas += 1
+                    else:
+                        print(f"slack: FALHOU ao lembrar claim {row['claim_id']} "
+                              f"(pedido {row['order_id']}) em {canal}", file=sys.stderr)
     finally:
         conn.close()
-    # Atualiza o Quadro Kanban depois de processar as notificacoes.
+    # Atualiza o Quadro Kanban depois de processar as notificacoes. O quadro e
+    # a visao principal da Maria: se ele nao atualizar, o ciclo falhou -- por
+    # isso conta como tentativa e derruba o run (nao mais try/except: pass).
+    tentadas += 1
     try:
-        publicar_quadro(canal)
-    except Exception:
-        pass
-    return enviadas
+        if publicar_quadro(canal):
+            enviadas += 1
+        else:
+            print(f"slack: FALHOU ao atualizar o Quadro em {canal}", file=sys.stderr)
+    except Exception as exc:
+        print(f"slack: erro ao atualizar o Quadro em {canal}: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+    return tentadas, enviadas
 
 
 def _get_board_ts(cur, canal: str) -> Optional[tuple[str, str]]:
@@ -765,22 +797,32 @@ def main() -> None:
     ap.add_argument("--canal", default=CANAL_PADRAO,
                     help=f"canal do Slack (default {CANAL_PADRAO})")
     args = ap.parse_args()
+    # FAIL-LOUD: sem token nao ha "nada a fazer" -- ha uma configuracao
+    # quebrada, e o run tem que ficar vermelho para alguem ver.
     if not slack_client._token():
-        print("slack: sem Bot Token (SLACK_BOT_TOKEN ou arquivo local) — nada a fazer")
-        return
+        print("slack: sem Bot Token (SLACK_BOT_TOKEN ou arquivo local)", file=sys.stderr)
+        sys.exit(1)
     if args.test:
         teste(args.canal)
     if args.quadro:
         ok = publicar_quadro(args.canal)
-        print("✓ quadro atualizado" if ok else "quadro: falhou")
-        return
+        print("✓ quadro atualizado" if ok else "quadro: FALHOU", file=sys.stderr if not ok else None)
+        sys.exit(0 if ok else 1)
     if args.resumo:
         n = resumo_diario(args.canal)
-        print("✓ resumo diário enviado" if n else "resumo diário: nada a enviar")
+        if not n:
+            print("resumo diário: FALHOU ao enviar", file=sys.stderr)
+            sys.exit(1)
+        print("✓ resumo diário enviado")
         return
     if args.once or not args.test:
-        n = notificar_processos(args.canal)
-        print(f"✓ {n} processo(s) notificado(s) em {args.canal}")
+        tentadas, enviadas = notificar_processos(args.canal)
+        codigo = status_saida(tentadas, enviadas)
+        if codigo:
+            print(f"slack: {enviadas}/{tentadas} enviadas em {args.canal} — "
+                  f"{tentadas - enviadas} FALHARAM", file=sys.stderr)
+            sys.exit(codigo)
+        print(f"✓ {enviadas}/{tentadas} enviada(s) em {args.canal}")
 
 
 if __name__ == "__main__":
