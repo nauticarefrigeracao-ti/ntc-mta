@@ -528,6 +528,19 @@ def montar_fechamento(rows, data_str: str) -> tuple[str, list[dict]]:
 
     rows = casos fechados no dia, cada um com 'saldo' (meli_page_saldos.total),
     order_id, item_title, item_sku."""
+    # Um claim tem varias chaves de estado em slack_notificados ("closed:a",
+    # "closed:b") e o JOIN devolve uma linha por chave -- sem isto o mesmo
+    # caso era contado duas vezes e o prejuizo do chefe saia INFLADO.
+    vistos, unicos = set(), []
+    for r in rows:
+        ident = r.get("claim_id") or r.get("order_id")
+        if ident is not None and ident in vistos:
+            continue
+        if ident is not None:
+            vistos.add(ident)
+        unicos.append(r)
+    rows = unicos
+
     grupos: dict[str, list] = {"negativo": [], "zero": [], "revertido": [], "pendente": []}
     for r in rows:
         grupos[classificar_desfecho(r.get("saldo"))].append(r)

@@ -9,8 +9,16 @@ import json
 from slack_notify import classificar_desfecho, montar_fechamento
 
 
+_seq = iter(range(1, 10_000))
+
+
 def _c(saldo, **over):
-    base = {"order_id": 2000012345678, "item_title": "Motor X", "item_sku": "NR1", "saldo": saldo}
+    """Caso fechado. Cada chamada recebe uma identidade PROPRIA por padrao --
+    casos distintos nao podem colidir na deduplicacao; quem quiser testar
+    repeticao passa claim_id/order_id explicitamente."""
+    n = next(_seq)
+    base = {"claim_id": 9_000_000 + n, "order_id": 2000012345678 + n,
+            "item_title": "Motor X", "item_sku": "NR1", "saldo": saldo}
     base.update(over)
     return base
 
@@ -108,3 +116,32 @@ def test_prejuizos_vem_do_maior_para_o_menor():
     _, blocks = montar_fechamento(rows, "29/07/2026")
     corpo = _txt(blocks)
     assert corpo.index("Grande") < corpo.index("Medio") < corpo.index("Pequeno")
+
+
+# --- deduplicacao ----------------------------------------------------------
+# O mesmo claim tem varias chaves de estado em slack_notificados ("closed:a",
+# "closed:b"), e o JOIN devolvia uma linha por chave. O caso era contado duas
+# vezes e o prejuizo do chefe saia INFLADO. Numero errado e pior que numero
+# faltando: ninguem desconfia de um numero.
+
+def test_mesmo_claim_repetido_conta_uma_vez_so():
+    rows = [_c(-100.0, claim_id=1), _c(-100.0, claim_id=1)]
+    _, blocks = montar_fechamento(rows, "29/07/2026")
+    corpo = _txt(blocks)
+    assert "Prejuízo* — 1" in corpo or '"🔴 *Prejuízo* — 1' in corpo
+    # o saldo tambem nao pode dobrar
+    assert "200,00" not in corpo
+
+
+def test_claims_diferentes_no_mesmo_pedido_contam_separado():
+    # um pedido pode ter mais de um processo legitimo; a identidade e o claim
+    rows = [_c(-100.0, claim_id=1, order_id=999), _c(-50.0, claim_id=2, order_id=999)]
+    _, blocks = montar_fechamento(rows, "29/07/2026")
+    assert "Prejuízo* — 2" in _txt(blocks)
+
+
+def test_sem_claim_id_cai_para_order_id_como_identidade():
+    rows = [_c(-100.0, claim_id=None, order_id=999),
+            _c(-100.0, claim_id=None, order_id=999)]
+    _, blocks = montar_fechamento(rows, "29/07/2026")
+    assert "200,00" not in _txt(blocks)
