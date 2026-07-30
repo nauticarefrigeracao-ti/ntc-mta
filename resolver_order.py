@@ -47,10 +47,23 @@ def resolver_order_id(valor) -> Optional[int]:
     return int(oid)
 
 
+def em_lotes(itens, tamanho: int):
+    """Fatia a lista em levas. O Neon derruba conexao ociosa/longa
+    ("SSL connection has been closed unexpectedly") no meio de um run de 12k;
+    sem lote, o commit final leva junto tudo que ja tinha sido resolvido."""
+    itens = list(itens)
+    if tamanho <= 0:
+        tamanho = len(itens) or 1
+    for i in range(0, len(itens), tamanho):
+        yield itens[i:i + tamanho]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="mede sem gravar")
     ap.add_argument("--limite", type=int, default=500)
+    ap.add_argument("--lote", type=int, default=200,
+                    help="reconecta e commita a cada N (default 200)")
     args = ap.parse_args()
 
     from src.db.connection import get_db_connection
@@ -73,39 +86,55 @@ def main() -> int:
                 novo = resolver_order_id(oid)
                 print(f"  claim {claim_id}: {oid} -> {novo or 'NAO RESOLVIDO'}")
             return 0
-
-        # backup antes de escrever: o UPDATE troca uma chave usada em joins,
-        # entao precisa ser desfazivel linha a linha.
-        import csv
-        from datetime import datetime
-        backup = f"backup_order_id_{datetime.now():%Y%m%d_%H%M%S}.csv"
-
-        resolvidos = falhas = 0
-        with open(backup, "w", newline="", encoding="utf-8") as fh:
-            w = csv.writer(fh)
-            w.writerow(["claim_id", "order_id_antigo", "order_id_novo"])
-            with conn.cursor() as cur:
-                for claim_id, oid in alvos:
-                    novo = resolver_order_id(oid)
-                    if not novo:
-                        falhas += 1
-                        continue
-                    w.writerow([claim_id, oid, novo])
-                    fh.flush()
-                    cur.execute(
-                        "UPDATE ml_devolucoes SET order_id = %s "
-                        "WHERE claim_id = %s AND order_id = %s",
-                        (novo, claim_id, oid))
-                    resolvidos += 1
-                    if resolvidos % 25 == 0:
-                        conn.commit()
-                        print(f"  ... {resolvidos} resolvidos")
-            conn.commit()
-        print(f"\nresolvidos={resolvidos}  nao resolvidos={falhas}")
-        print(f"backup (para desfazer): {backup}")
-        return 0
     finally:
         conn.close()
+
+    # backup antes de escrever: o UPDATE troca uma chave usada em joins,
+    # entao precisa ser desfazivel linha a linha.
+    import csv
+    from datetime import datetime
+    backup = f"backup_order_id_{datetime.now():%Y%m%d_%H%M%S}.csv"
+
+    resolvidos = falhas = 0
+    with open(backup, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["claim_id", "order_id_antigo", "order_id_novo"])
+        fh.flush()
+
+        for n, lote in enumerate(em_lotes(alvos, args.lote), 1):
+            # conexao NOVA por lote: uma queda so custa o lote corrente, e o
+            # que ja foi commitado fica. O SELECT filtra por tamanho, entao
+            # rodar de novo retoma naturalmente de onde parou.
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cur:
+                    for claim_id, oid in lote:
+                        novo = resolver_order_id(oid)
+                        if not novo:
+                            falhas += 1
+                            continue
+                        w.writerow([claim_id, oid, novo])
+                        fh.flush()
+                        cur.execute(
+                            "UPDATE ml_devolucoes SET order_id = %s "
+                            "WHERE claim_id = %s AND order_id = %s",
+                            (novo, claim_id, oid))
+                        resolvidos += 1
+                conn.commit()
+                print(f"  lote {n}: {resolvidos} resolvidos / {falhas} sem resolver")
+            except Exception as exc:
+                # FAIL-LOUD: diz qual lote caiu e por que, em vez de morrer mudo
+                print(f"  lote {n} FALHOU: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    print(f"\nresolvidos={resolvidos}  nao resolvidos={falhas}")
+    print(f"backup (para desfazer): {backup}")
+    return 0
 
 
 if __name__ == "__main__":

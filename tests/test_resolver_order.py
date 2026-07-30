@@ -8,7 +8,27 @@ caem como "conciliacao pendente" no fechamento do chefe.
 """
 from unittest.mock import patch
 
-from resolver_order import parece_shipment, resolver_order_id
+from resolver_order import em_lotes, parece_shipment, resolver_order_id
+
+
+# --- lotes: o Neon derruba conexao longa ------------------------------------
+# "SSL connection has been closed unexpectedly" no meio de um run de 12k --
+# sem lote, o commit final leva junto tudo que ja tinha sido resolvido.
+
+def test_divide_em_lotes_do_tamanho_pedido():
+    assert list(em_lotes([1, 2, 3, 4, 5], 2)) == [[1, 2], [3, 4], [5]]
+
+
+def test_lote_maior_que_a_lista_devolve_uma_leva_so():
+    assert list(em_lotes([1, 2], 10)) == [[1, 2]]
+
+
+def test_lista_vazia_nao_gera_lote():
+    assert list(em_lotes([], 5)) == []
+
+
+def test_tamanho_invalido_nao_trava_em_loop_infinito():
+    assert list(em_lotes([1, 2, 3], 0)) == [[1, 2, 3]]
 
 
 def test_id_de_16_digitos_e_pedido_real():
