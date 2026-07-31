@@ -250,6 +250,27 @@ def deve_anunciar(claim_status: str, ja_notificado_antes: bool) -> bool:
     return True
 
 
+def deve_notificar_no_canal(row: Mapping[str, Any]) -> bool:
+    """Este caso merece uma MENSAGEM, ou basta estar no Canvas?
+
+    D3 da reuniao de 31/07. Medicao que motivou: das 79 notificacoes de 7
+    dias, 60 (76%) eram de casos em DISPUTA -- em que quem decide e o Mercado
+    Livre e nao ha nada que a Maria possa fazer. Mensagem para cada uma treina
+    ela a ignorar o canal e afoga os poucos que exigem resposta (3 de 40).
+
+    Vira mensagem:
+      - aberto em claim/recontact -> a bola esta com a gente, o prazo corre;
+      - qualquer caso FECHADO     -> e o desfecho, e o que vira dinheiro.
+
+    Fica so no Canvas:
+      - aberto em disputa  -> o ML arbitra, nao ha acao possivel;
+      - devolucao em transito -> rastreio mudando nao pede acao.
+    """
+    if row.get("claim_status") == "closed":
+        return True
+    return row.get("claim_stage") in ESTAGIOS_COM_LEMBRETE
+
+
 def precisa_lembrete(row: Mapping[str, Any], ultimo_aviso: Optional[datetime],
                       agora: Optional[datetime] = None) -> bool:
     """True se o processo ainda exige resposta do vendedor (reclamacao direta
@@ -767,6 +788,7 @@ def notificar_processos(canal: str = CANAL_PADRAO) -> tuple[int, int]:
     conn = get_db_connection()
     tentadas = 0
     enviadas = 0
+    silenciadas = 0  # D3: casos que ficam so no Canvas (disputa/transito)
     try:
         with conn.cursor() as cur:
             cur.execute(_DDL)
@@ -793,6 +815,19 @@ def notificar_processos(canal: str = CANAL_PADRAO) -> tuple[int, int]:
                     atualizacao = eh_atualizacao(anteriores)
                     # R4: pula caso que ja nasce fechado sem historico (passado).
                     if not deve_anunciar(row["claim_status"], atualizacao):
+                        continue
+                    # D3: disputa aberta nao vira mensagem -- quem decide e o
+                    # ML, nao ha acao possivel. Ela continua visivel no Canvas.
+                    # Sem isto, 76% das mensagens nao pediam nada e afogavam as
+                    # poucas que pediam. O estado e registrado do mesmo jeito,
+                    # para nao reaparecer como "novo" quando virar acionavel.
+                    if not deve_notificar_no_canal(row):
+                        cur.execute(
+                            "INSERT INTO slack_notificados (claim_id, status) "
+                            "VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                            (row["claim_id"], chave))
+                        conn.commit()
+                        silenciadas += 1
                         continue
                     saldo = _saldo_do_pedido(cur, row["order_id"]) if row["claim_status"] == "closed" else None
                     texto, blocks = montar_mensagem(row, saldo, atualizacao, agora)
@@ -835,6 +870,8 @@ def notificar_processos(canal: str = CANAL_PADRAO) -> tuple[int, int]:
     except Exception as exc:
         print(f"slack: erro ao atualizar o Quadro em {canal}: {type(exc).__name__}: {exc}",
               file=sys.stderr)
+    if silenciadas:
+        print(f"  {silenciadas} caso(s) sem acao possivel ficaram so no Canvas (D3)")
     return tentadas, enviadas
 
 
@@ -1122,5 +1159,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 

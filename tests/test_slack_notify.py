@@ -8,6 +8,7 @@ suposicoes sobre a documentacao oficial do Mercado Livre.
 from datetime import datetime, timedelta, timezone
 
 from slack_notify import (
+    deve_notificar_no_canal,
     bloco_financeiro,
     bloco_tracking,
     categorizar,
@@ -361,6 +362,49 @@ def test_motivo_codigo_desconhecido_tem_fallback_legivel():
     assert "1234" not in out and out
 
 
+# ── D3: so o acionavel vira mensagem; o resto vive no Canvas ────────────────
+# Medido em 31/07: das 79 notificacoes de 7 dias, 60 (76%) eram de casos em
+# disputa -- que NAO pedem nada da Maria, porque quem decide e o ML. Mandar
+# mensagem para cada uma treina ela a ignorar o canal, e af oga os 3 que
+# importam.
+
+def test_disputa_aberta_nao_vira_mensagem():
+    """Ela nao pode fazer nada: o ML esta arbitrando. Fica so no Canvas."""
+    assert deve_notificar_no_canal(_row(claim_status="opened",
+                                        claim_stage="dispute")) is False
+
+
+def test_reclamacao_aberta_vira_mensagem():
+    """O prazo corre contra nos -- isso ela precisa saber agora."""
+    assert deve_notificar_no_canal(_row(claim_status="opened",
+                                        claim_stage="claim")) is True
+
+
+def test_recontato_vira_mensagem():
+    """O ML pediu informacao: exige resposta."""
+    assert deve_notificar_no_canal(_row(claim_status="opened",
+                                        claim_stage="recontact")) is True
+
+
+def test_fechado_vira_mensagem_porque_e_desfecho():
+    """Encerramento fecha a historia da venda -- e o que vira dinheiro."""
+    assert deve_notificar_no_canal(_row(claim_status="closed",
+                                        claim_stage="dispute")) is True
+
+
+def test_devolucao_em_transito_nao_vira_mensagem():
+    """Rastreio mudando nao pede acao; polui e nao informa nada acionavel."""
+    assert deve_notificar_no_canal(_row(claim_status="opened",
+                                        claim_stage="none",
+                                        claim_type="returns")) is False
+
+
+def test_cancelamento_e_informativo_mas_e_desfecho():
+    assert deve_notificar_no_canal(_row(claim_status="closed",
+                                        claim_type="cancel_purchase",
+                                        claim_stage="none")) is True
+
+
 def test_notificacao_individual_nao_mostra_codigo_cru():
     """Achado no #sac em 31/07: a Maria recebeu "Motivo: PDD9952".
 
@@ -501,3 +545,4 @@ def test_mensagem_blocks_tem_link_da_venda():
 def test_lembrete_blocks_tem_link_da_venda():
     _, blocks = montar_mensagem_lembrete(_row(order_id=2000012345678))
     assert "vendas/2000012345678/detalhe" in _blocks_str(blocks)
+
