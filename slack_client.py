@@ -186,7 +186,12 @@ def garantir_canal(nome: str) -> Optional[str]:
     canais = listar_canais()
     if canais is None:
         return None
-    cid = canais.get(nome) or criar_canal(nome)
+    # listar_canais devolve a LISTA crua da API (cada item tem name/id) --
+    # antes havia uma versao que devolvia {nome: id} e este ponto ficou para
+    # tras, quebrando com "list object has no attribute get" na primeira
+    # execucao real do fechamento.
+    por_nome = {c.get("name"): c.get("id") for c in canais}
+    cid = por_nome.get(nome) or criar_canal(nome)
     if not cid:
         return None
     entrar_no_canal(cid)

@@ -227,6 +227,27 @@ def test_canvas_criar_devolve_id():
             assert slack_client.canvas_criar("C1", "# oi") == "F123"
 
 
+def test_garantir_canal_encontra_pelo_nome_na_lista():
+    """Regressao: listar_canais devolve a LISTA crua da API. garantir_canal
+    tratava como dict {nome: id} e quebrava com
+    "list object has no attribute get" -- so na execucao real, porque nenhum
+    teste cobria o caminho."""
+    with patch.object(slack_client, "listar_canais",
+                      return_value=[{"name": "sac", "id": "C1"},
+                                    {"name": "sac-fechamento", "id": "C2"}]):
+        with patch.object(slack_client, "entrar_no_canal", return_value=True):
+            assert slack_client.garantir_canal("#sac-fechamento") == "C2"
+            assert slack_client.garantir_canal("sac") == "C1"
+
+
+def test_garantir_canal_cria_quando_nao_existe():
+    with patch.object(slack_client, "listar_canais", return_value=[]):
+        with patch.object(slack_client, "criar_canal", return_value="C9") as m:
+            with patch.object(slack_client, "entrar_no_canal", return_value=True):
+                assert slack_client.garantir_canal("#novo") == "C9"
+            m.assert_called_once_with("novo")
+
+
 def test_canvas_criar_manda_titulo():
     """Sem titulo o Slack rotula a aba como "Sem titulo" -- com mais de um
     canvas, ninguem sabe em qual clicar."""
