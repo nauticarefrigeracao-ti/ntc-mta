@@ -139,16 +139,41 @@ def test_sem_rastreio_nao_ganha_marca():
     assert "chegou" not in md.lower()
 
 
-def test_produto_que_chegou_vem_antes_dos_outros():
-    """Produto na mao e o mais acionavel de todos: fecha o caso e o dinheiro."""
+def test_produto_que_chegou_vem_antes_de_caso_sem_urgencia():
+    """Produto na mao fecha o caso E o dinheiro -- vem antes de um caso com
+    prazo ainda folgado.
+
+    Ordem completa (ver _ordem_por_idade): prazo vencido > prazo apertado >
+    produto no galpão > mais antigo. D4 colocou prazo acima de tudo, porque
+    prazo vencido já está custando reputação ou dinheiro parado.
+    """
+    from datetime import datetime, timedelta, timezone
+    agora = datetime.now(timezone.utc)
     rows = [
+        # aberto há 1h: prazo folgado, sem produto
         _row(order_id=111, tracking_status=None,
-             date_created="2026-07-01T10:00:00-03:00"),
+             date_created=(agora - timedelta(hours=1)).isoformat()),
+        # aberto há 2h: prazo folgado também, mas o produto já chegou
         _row(order_id=222, tracking_status="delivered",
-             date_created="2026-07-30T10:00:00-03:00"),
+             date_created=(agora - timedelta(hours=2)).isoformat()),
     ]
     md = montar_canvas_quadro(rows, "31/07")
     assert md.index("222") < md.index("111")
+
+
+def test_prazo_vencido_vem_antes_de_produto_que_chegou():
+    """D4: o que já venceu custa agora; o produto no galpão pode esperar
+    algumas horas a mais."""
+    from datetime import datetime, timedelta, timezone
+    agora = datetime.now(timezone.utc)
+    rows = [
+        _row(order_id=333, tracking_status="delivered",
+             date_created=(agora - timedelta(hours=2)).isoformat()),
+        _row(order_id=444, tracking_status=None,
+             date_created=(agora - timedelta(hours=100)).isoformat()),
+    ]
+    md = montar_canvas_quadro(rows, "31/07")
+    assert md.index("444") < md.index("333")
 
 
 def test_marca_aparece_tambem_em_disputa_no_contador():

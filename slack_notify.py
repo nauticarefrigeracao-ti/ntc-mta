@@ -462,6 +462,97 @@ def _linha_quadro(row: Mapping[str, Any]) -> str:
     return f"• *{titulo}* (SKU {sku}) · _{motivo}_ · <{_link_venda(oid)}|abrir a venda>"
 
 
+# D4 -- cada etapa tem um relogio proprio. Tratar todas igual esconde o que
+# corre risco de verdade.
+HORAS_RESPONDER_CLAIM = 48       # ~2 dias corridos para responder no ML
+HORAS_FECHAR_APOS_ENTREGA = 48   # produto no galpao e caso aberto = dinheiro parado
+HORAS_APERTADO = 12              # abaixo disto, avisa antes de estourar
+
+
+def _quando_abriu(row: Mapping[str, Any]) -> Optional[datetime]:
+    """date_created em datetime com fuso, ou None se ausente/invalida."""
+    v = row.get("date_created")
+    if not v:
+        return None
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    try:
+        d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def horas_restantes(row: Mapping[str, Any],
+                    agora: Optional[datetime] = None) -> Optional[float]:
+    """Horas que faltam para o prazo desta etapa. Negativo = estourou.
+    None quando nao existe prazo nosso (o ML e quem decide)."""
+    if row.get("claim_status") == "closed":
+        return None
+    agora = agora or datetime.now(timezone.utc)
+    abriu = _quando_abriu(row)
+    if abriu is None:
+        return None
+
+    # Produto entregue cria prazo NOSSO mesmo em disputa: a mercadoria ja
+    # esta aqui, e o caso aberto e dinheiro parado.
+    if produto_ja_chegou(row):
+        limite = HORAS_FECHAR_APOS_ENTREGA
+    elif row.get("claim_stage") in ESTAGIOS_COM_LEMBRETE:
+        limite = HORAS_RESPONDER_CLAIM
+    else:
+        return None
+
+    return limite - (agora - abriu).total_seconds() / 3600.0
+
+
+def situacao_prazo(row: Mapping[str, Any],
+                   agora: Optional[datetime] = None) -> str:
+    """'ok' | 'apertado' | 'estourado' | 'sem_prazo'.
+
+    'sem_prazo' e resposta legitima: em disputa quem decide e o Mercado Livre
+    e inventar um prazo nosso seria mentir para a Maria."""
+    h = horas_restantes(row, agora)
+    if h is None:
+        return "sem_prazo"
+    if h < 0:
+        return "estourado"
+    if h <= HORAS_APERTADO:
+        return "apertado"
+    return "ok"
+
+
+def _atraso_legivel(horas: float) -> str:
+    """Atraso na unidade que a pessoa entende.
+
+    A primeira versao imprimiu "venceu há 14180h" -- 1,6 ano em horas. Numero
+    ilegivel nao informa: assusta e passa a ser ignorado, que e o oposto do
+    que um alerta deve fazer."""
+    h = int(abs(horas))
+    if h < 48:
+        return f"{h}h"
+    dias = h // 24
+    if dias < 60:
+        return f"{dias} dias"
+    meses = dias // 30
+    if meses < 24:
+        return f"{meses} meses"
+    return f"{meses // 12} anos"
+
+
+def texto_prazo_curto(row: Mapping[str, Any],
+                      agora: Optional[datetime] = None) -> str:
+    """Marca curta para o Canvas. Vazio quando nao ha prazo -- o quadro ja
+    diz que o ML esta decidindo, nao precisa de um segundo aviso."""
+    sit = situacao_prazo(row, agora)
+    if sit in ("sem_prazo", "ok"):
+        return ""
+    h = horas_restantes(row, agora) or 0
+    if sit == "estourado":
+        return f"🚨 **prazo venceu** há {_atraso_legivel(h)}"
+    return f"⏰ restam ~{int(h)}h"
+
+
 def produto_ja_chegou(row: Mapping[str, Any]) -> bool:
     """O produto devolvido ja esta no galpao?
 
@@ -472,13 +563,22 @@ def produto_ja_chegou(row: Mapping[str, Any]) -> bool:
     return str(st).lower() == "delivered"
 
 
+_ORDEM_SITUACAO = {"estourado": 0, "apertado": 1, "ok": 2, "sem_prazo": 3}
+
+
 def _ordem_por_idade(row: Mapping[str, Any]):
-    """Produto que ja chegou vem primeiro -- e o caso mais acionavel de todos:
-    fecha o atendimento E libera o dinheiro. Depois, mais antigo primeiro:
-    quem espera ha mais tempo corre mais risco de estourar prazo. Caso sem
-    data vai para o fim, sem quebrar a ordenacao."""
+    """Ordem do que a Maria deve olhar primeiro:
+
+    1. prazo VENCIDO -- ja custa reputacao ou dinheiro parado;
+    2. prazo apertado -- da para salvar se agir agora;
+    3. produto ja no galpao -- fecha o atendimento E libera o dinheiro;
+    4. mais antigo primeiro, porque espera mais tempo = mais risco.
+
+    Caso sem data vai para o fim, sem quebrar a ordenacao."""
     d = row.get("date_created")
-    return (not produto_ja_chegou(row), d is None, str(d or ""))
+    return (_ORDEM_SITUACAO.get(situacao_prazo(row), 3),
+            not produto_ja_chegou(row),
+            d is None, str(d or ""))
 
 
 def resumo_uma_linha(rows) -> str:
@@ -515,7 +615,18 @@ def montar_canvas_quadro(rows, data_str: str,
     if not a_fazer:
         L.append("_Nada pendente da sua parte agora._")
     else:
-        L.append("_Responda no Mercado Livre. O prazo está correndo._")
+        n_venceu = sum(1 for r in a_fazer
+                       if situacao_prazo(r) == "estourado")
+        n_apertado = sum(1 for r in a_fazer
+                         if situacao_prazo(r) == "apertado")
+        if n_venceu:
+            # Primeira linha do quadro: o que ja custa caro. Sem isso, o
+            # urgente fica com a mesma aparencia do que pode esperar.
+            L.append(f"**{n_venceu} com prazo VENCIDO** — comece por aqui.")
+        elif n_apertado:
+            L.append(f"**{n_apertado} vence(m) nas próximas horas.**")
+        else:
+            L.append("_Responda no Mercado Livre. O prazo está correndo._")
         L.append("")
         for r in a_fazer:
             titulo = (r.get("item_title") or "Produto").strip() or "Produto"
@@ -527,8 +638,10 @@ def montar_canvas_quadro(rows, data_str: str,
             total = r.get("order_total")
             valor = f" · {_fmt_brl(total)}" if total else ""
             chegou = "📦 **o produto já chegou** · " if produto_ja_chegou(r) else ""
+            prazo = texto_prazo_curto(r)
+            marca = f"{prazo} · " if prazo else ""
             L.append(f"- **{titulo}**")
-            L.append(f"  {chegou}SKU {sku} · _{motivo}_{valor}")
+            L.append(f"  {marca}{chegou}SKU {sku} · _{motivo}_{valor}")
             if oid:
                 L.append(f"  [Abrir a venda {oid}]({_link_venda(oid)})")
     L.append("")
