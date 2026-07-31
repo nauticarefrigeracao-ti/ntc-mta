@@ -273,15 +273,42 @@ def listar_canais(limit: int = 200) -> Optional[list]:
     return body.get("channels") or []
 
 
-def canvas_criar(channel_id: str, markdown: str, **kw) -> Optional[str]:
-    """Cria o Canvas do canal e devolve o canvas_id. Um canal so tem UM canvas
-    proprio: chamar de novo num canal que ja tem devolve erro, por isso quem
-    chama guarda o id."""
+def canvas_criar(channel_id: str, markdown: str,
+                 titulo: str = "Quadro do SAC", **kw) -> Optional[str]:
+    """Cria um Canvas no canal e devolve o canvas_id.
+
+    O `titulo` NAO e cosmetico: e o rotulo da aba no topo do canal. Sem ele o
+    Slack mostra "Sem titulo", e com mais de um canvas a Maria nao sabe em
+    qual clicar -- foi o que aconteceu no #sac-teste, que acumulou tres abas
+    "Sem titulo", uma por execucao.
+
+    Quem chama guarda o id: cada chamada cria um canvas NOVO, nao reaproveita
+    o existente."""
     r = _post_json(_API_CANVAS_CREATE, {
         "channel_id": channel_id,
+        "title": titulo,
         "document_content": {"type": "markdown", "markdown": markdown},
     }, **kw)
     return r.get("canvas_id") if r else None
+
+
+_API_SET_PURPOSE = "https://slack.com/api/conversations.setPurpose"
+_API_SET_TOPIC = "https://slack.com/api/conversations.setTopic"
+
+
+def definir_proposito(channel_id: str, texto: str, **kw) -> bool:
+    """Proposito do canal -- o que quem entra le antes de qualquer mensagem.
+
+    Canal sem proposito obriga a pessoa nova a deduzir para que ele serve
+    lendo o historico. Aqui a explicacao fica no lugar onde ela procura."""
+    return bool(_post_json(_API_SET_PURPOSE,
+                           {"channel": channel_id, "purpose": texto}, **kw))
+
+
+def definir_topico(channel_id: str, texto: str, **kw) -> bool:
+    """Topico do canal -- a linha curta que aparece no cabecalho."""
+    return bool(_post_json(_API_SET_TOPIC,
+                           {"channel": channel_id, "topic": texto}, **kw))
 
 
 def canvas_editar(canvas_id: str, markdown: str, **kw) -> bool:

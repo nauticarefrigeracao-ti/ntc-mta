@@ -227,6 +227,34 @@ def test_canvas_criar_devolve_id():
             assert slack_client.canvas_criar("C1", "# oi") == "F123"
 
 
+def test_canvas_criar_manda_titulo():
+    """Sem titulo o Slack rotula a aba como "Sem titulo" -- com mais de um
+    canvas, ninguem sabe em qual clicar."""
+    captured = {}
+
+    def fake(req, timeout=20):
+        captured["body"] = json.loads(req.data)
+        return _fake_response({"ok": True, "canvas_id": "F1"})
+
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen", side_effect=fake):
+            slack_client.canvas_criar("C1", "# oi")
+    assert captured["body"]["title"] == "Quadro do SAC"
+
+
+def test_canvas_criar_aceita_titulo_customizado():
+    captured = {}
+
+    def fake(req, timeout=20):
+        captured["body"] = json.loads(req.data)
+        return _fake_response({"ok": True, "canvas_id": "F1"})
+
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen", side_effect=fake):
+            slack_client.canvas_criar("C1", "# oi", titulo="Fechamento do dia")
+    assert captured["body"]["title"] == "Fechamento do dia"
+
+
 def test_canvas_criar_sem_token_nao_chama_rede():
     with patch.object(slack_client, "_token", return_value=None):
         with patch("urllib.request.urlopen") as m:
