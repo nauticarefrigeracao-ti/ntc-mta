@@ -59,16 +59,54 @@ _cache: dict[str, tuple[float, Any]] = {}
 _MISS = object()
 
 
-def _token() -> str:
-    """Read Tiny token from st.secrets or TINY_TOKEN env var. Never hardcoded."""
+_TOKEN_CACHE: dict[str, Any] = {"value": "", "expires": 0.0}
+_TOKEN_TTL = 5 * 3600  # 5 h — igual ao ml_client
+
+
+def _fetch_tiny_token_from_neon() -> str:
+    """Lê o token da Tiny da tabela TinyCredential no Neon (mesmo padrão do
+    MlCredential usado pelo ml_client). É isso que dá AUTONOMIA ao sync cloud:
+    sem depender de um secret TINY_TOKEN em cada repo — o token vive no banco
+    que todos os sistemas já compartilham. Devolve "" em qualquer erro."""
     try:
-        import streamlit as st
-        tok = st.secrets.get("TINY_TOKEN") or ""
-        if tok:
-            return tok
+        from src.db.connection import get_db_connection
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'SELECT token FROM "TinyCredential" '
+                    "WHERE provider = 'tiny' ORDER BY \"createdAt\" DESC NULLS LAST LIMIT 1"
+                )
+                row = cur.fetchone()
+                return (row[0] or "") if row else ""
+        finally:
+            conn.close()
     except Exception:
-        pass
-    return os.environ.get("TINY_TOKEN", "")
+        return ""
+
+
+def _token() -> str:
+    """Token da Tiny. Prioridade: env/st.secrets (override) -> Neon
+    (TinyCredential) -> "". Cacheado 5h pra não bater no Neon a cada chamada.
+    Nunca hardcoded, nunca lança."""
+    now = time.time()
+    if _TOKEN_CACHE["value"] and now < _TOKEN_CACHE["expires"]:
+        return _TOKEN_CACHE["value"]
+
+    tok = os.environ.get("TINY_TOKEN", "")
+    if not tok:
+        try:
+            import streamlit as st
+            tok = st.secrets.get("TINY_TOKEN") or ""
+        except Exception:
+            tok = ""
+    if not tok:
+        tok = _fetch_tiny_token_from_neon()
+
+    if tok:
+        _TOKEN_CACHE["value"] = tok
+        _TOKEN_CACHE["expires"] = now + _TOKEN_TTL
+    return tok
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────

@@ -103,6 +103,10 @@ def _token() -> str:
     tok = ""
 
     # 1. Neon PostgreSQL (auto-rotated tokens — always freshest)
+    # env var PRIMEIRO: no GitHub Actions não há secrets.toml e st.secrets.get()
+    # LANÇA — antes isso derrubava todo o fetch do token sem cair no fallback,
+    # deixando o sync cloud sem token (enriched=0). Só toca st.secrets se o env
+    # não tiver a URL (ambiente Streamlit Cloud).
     neon_url = os.environ.get("ML_NEON_URL", "") or _secret("ML_NEON_URL")
     if neon_url:
         tok = _fetch_token_from_neon(neon_url)
@@ -213,6 +217,24 @@ def get_order(order_id: int | str | None) -> dict | None:
         return _non_empty(_get(f"/orders/{order_id}"))
     except Exception:
         return None
+
+
+def get_order_ex(order_id: int | str | None) -> tuple[dict | None, int | None]:
+    """(pedido, http_status). http_status 404 = o pedido NÃO EXISTE no ML
+    (id herdado de CSV/planilha) — estado terminal, distinto de erro transiente
+    (429/timeout), em que retorna (None, código|None) e vale re-tentar."""
+    if not order_id and order_id != 0:
+        return None, None
+    try:
+        tok = _token()
+        url = f"{_ML_BASE}/orders/{order_id}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return _non_empty(json.loads(resp.read())), resp.status
+    except urllib.error.HTTPError as exc:
+        return None, exc.code
+    except Exception:
+        return None, None
 
 
 def get_item(item_id: str | None) -> dict | None:
