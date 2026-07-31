@@ -278,6 +278,33 @@ def listar_canais(limit: int = 200) -> Optional[list]:
     return body.get("channels") or []
 
 
+_API_HISTORY = "https://slack.com/api/conversations.history"
+
+
+def ultimas_mensagens(channel_id: str, limite: int = 20) -> Optional[list]:
+    """Textos das ultimas mensagens do canal.
+
+    Usado para nao republicar o fechamento do mesmo dia. Devolve None quando
+    nao da para ler -- e o chamador decide; None nao pode ser confundido com
+    "canal vazio", senao a protecao contra duplicata sumiria em silencio."""
+    tok = _token()
+    if not tok:
+        return None
+    url = f"{_API_HISTORY}?channel={channel_id}&limit={limite}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = json.loads(resp.read())
+    except Exception:
+        return None
+    if not body.get("ok"):
+        import sys
+        print(f"[conversations.history FALHOU] error={body.get('error')}",
+              file=sys.stderr)
+        return None
+    return [m.get("text") or "" for m in body.get("messages", [])]
+
+
 def canvas_criar(channel_id: str, markdown: str,
                  titulo: str = "Quadro do SAC", **kw) -> Optional[str]:
     """Cria um Canvas no canal e devolve o canvas_id.

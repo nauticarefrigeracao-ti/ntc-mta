@@ -250,6 +250,22 @@ def deve_anunciar(claim_status: str, ja_notificado_antes: bool) -> bool:
     return True
 
 
+def fechamento_ja_publicado(textos, data_str: str) -> bool:
+    """Ja existe fechamento desse dia no canal?
+
+    O #sac-fechamento apareceu com a MESMA mensagem duas vezes -- o job rodou
+    duas vezes no mesmo dia. Para a diretoria, dois fechamentos iguais
+    levantam a duvida certa ("entao qual dos dois vale?") e derrubam a
+    confianca no numero inteiro. Compara so pela data, ignorando emoji e
+    formatacao, porque o texto muda conforme o resultado."""
+    alvo = f"Fechamento"
+    for t in textos or []:
+        s = str(t or "")
+        if alvo.lower() in s.lower() and data_str in s:
+            return True
+    return False
+
+
 def deve_notificar_no_canal(row: Mapping[str, Any]) -> bool:
     """Este caso merece uma MENSAGEM, ou basta estar no Canvas?
 
@@ -446,11 +462,23 @@ def _linha_quadro(row: Mapping[str, Any]) -> str:
     return f"• *{titulo}* (SKU {sku}) · _{motivo}_ · <{_link_venda(oid)}|abrir a venda>"
 
 
+def produto_ja_chegou(row: Mapping[str, Any]) -> bool:
+    """O produto devolvido ja esta no galpao?
+
+    Medido em 31/07: 7 casos abertos com o pacote ja entregue (R$ 847,83), 3
+    deles em `claim`. A Maria pode fechar hoje -- mas nao tem como saber que o
+    produto esta na mao dela, porque o rastreio nunca chegou ao quadro."""
+    st = (row.get("tracking_status") or row.get("return_tracking_status") or "")
+    return str(st).lower() == "delivered"
+
+
 def _ordem_por_idade(row: Mapping[str, Any]):
-    """Mais antigo primeiro: quem espera ha mais tempo corre mais risco de
-    estourar prazo. Caso sem data vai para o fim, nao quebra a ordenacao."""
+    """Produto que ja chegou vem primeiro -- e o caso mais acionavel de todos:
+    fecha o atendimento E libera o dinheiro. Depois, mais antigo primeiro:
+    quem espera ha mais tempo corre mais risco de estourar prazo. Caso sem
+    data vai para o fim, sem quebrar a ordenacao."""
     d = row.get("date_created")
-    return (d is None, str(d or ""))
+    return (not produto_ja_chegou(row), d is None, str(d or ""))
 
 
 def resumo_uma_linha(rows) -> str:
@@ -498,16 +526,23 @@ def montar_canvas_quadro(rows, data_str: str,
             oid = r.get("order_id")
             total = r.get("order_total")
             valor = f" · {_fmt_brl(total)}" if total else ""
+            chegou = "📦 **o produto já chegou** · " if produto_ja_chegou(r) else ""
             L.append(f"- **{titulo}**")
-            L.append(f"  SKU {sku} · _{motivo}_{valor}")
+            L.append(f"  {chegou}SKU {sku} · _{motivo}_{valor}")
             if oid:
                 L.append(f"  [Abrir a venda {oid}]({_link_venda(oid)})")
     L.append("")
 
     # ── AGUARDANDO: contador, nao lista ───────────────────────────────────
+    n_chegou_aguardando = sum(1 for r in aguardando if produto_ja_chegou(r))
     L.append(f"## 🟡 Aguardando — {len(aguardando)}")
     L.append("_O Mercado Livre está arbitrando ou o produto está a caminho. "
              "Só acompanhar._")
+    if n_chegou_aguardando:
+        # Nao vai para A Fazer (a decisao ainda e do ML), mas o galpao precisa
+        # saber que a mercadoria ja esta aqui.
+        L.append(f"_Destes, **{n_chegou_aguardando}** já tiveram o produto "
+                 f"devolvido entregue._")
     L.append("")
 
     # ── FEITO ─────────────────────────────────────────────────────────────
@@ -954,10 +989,13 @@ def publicar_canvas(canal: str = CANAL_PADRAO) -> bool:
             conn.commit()
 
         with dict_cursor(conn) as cur:
+            # tracking_status vem junto: e ele que diz se o produto devolvido
+            # ja chegou no galpao. Sem essa coluna, os 7 casos abertos com
+            # pacote entregue (R$ 847,83) ficavam invisiveis para a Maria.
             cur.execute("""
                 SELECT claim_id, order_id, claim_status, claim_stage,
                        reason_label, item_title, item_sku, order_total,
-                       date_created
+                       date_created, tracking_status, return_tracking_status
                 FROM ml_devolucoes
                 WHERE claim_status = 'opened'
                    OR (claim_status = 'closed'
@@ -1107,6 +1145,15 @@ def resumo_diario(canal: str = CANAL_FECHAMENTO) -> int:
     # cria o canal e entra nele se preciso; se faltar permissao, garantir_canal
     # devolve None e seguimos pelo nome (funciona se alguem ja convidou o bot).
     destino = slack_client.garantir_canal(canal) or canal
+
+    # Nao publicar duas vezes o mesmo dia. O canal chegou a mostrar o mesmo
+    # fechamento repetido porque o job rodou duas vezes -- e para a diretoria
+    # dois numeros iguais levantam a duvida certa: "qual dos dois vale?".
+    recentes = slack_client.ultimas_mensagens(destino, limite=20) or []
+    if fechamento_ja_publicado(recentes, data_str):
+        print(f"fechamento de {data_str} ja publicado em {canal} — nada a fazer")
+        return 1
+
     return 1 if enviar(destino, texto, blocks=blocks) else 0
 
 

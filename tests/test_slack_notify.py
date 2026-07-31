@@ -8,6 +8,7 @@ suposicoes sobre a documentacao oficial do Mercado Livre.
 from datetime import datetime, timedelta, timezone
 
 from slack_notify import (
+    fechamento_ja_publicado,
     deve_notificar_no_canal,
     bloco_financeiro,
     bloco_tracking,
@@ -362,6 +363,36 @@ def test_motivo_codigo_desconhecido_tem_fallback_legivel():
     assert "1234" not in out and out
 
 
+# ── fechamento nao pode duplicar ────────────────────────────────────────────
+# O #sac-fechamento apareceu com a MESMA mensagem duas vezes: o job rodou duas
+# vezes no mesmo dia. Para a diretoria, dois fechamentos iguais levantam a
+# duvida certa -- "entao qual dos dois vale?" -- e derruba a confianca no
+# numero inteiro.
+
+def test_ja_publicado_hoje_impede_segundo_envio():
+    assert fechamento_ja_publicado(["Fechamento 30/07/2026: saldo R$ 425,35"],
+                                   "30/07/2026") is True
+
+
+def test_dia_diferente_nao_bloqueia():
+    assert fechamento_ja_publicado(["Fechamento 29/07/2026: saldo R$ 10,00"],
+                                   "30/07/2026") is False
+
+
+def test_canal_vazio_nao_bloqueia():
+    assert fechamento_ja_publicado([], "30/07/2026") is False
+
+
+def test_mensagem_de_outro_tipo_nao_bloqueia():
+    assert fechamento_ja_publicado(["definiu o assunto do canal"],
+                                   "30/07/2026") is False
+
+
+def test_reconhece_mesmo_com_emoji_e_formatacao():
+    assert fechamento_ja_publicado(
+        [":bar_chart: *Fechamento do dia — 30/07/2026*"], "30/07/2026") is True
+
+
 # ── D3: so o acionavel vira mensagem; o resto vive no Canvas ────────────────
 # Medido em 31/07: das 79 notificacoes de 7 dias, 60 (76%) eram de casos em
 # disputa -- que NAO pedem nada da Maria, porque quem decide e o ML. Mandar
@@ -545,4 +576,5 @@ def test_mensagem_blocks_tem_link_da_venda():
 def test_lembrete_blocks_tem_link_da_venda():
     _, blocks = montar_mensagem_lembrete(_row(order_id=2000012345678))
     assert "vendas/2000012345678/detalhe" in _blocks_str(blocks)
+
 

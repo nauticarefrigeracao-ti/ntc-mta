@@ -118,6 +118,48 @@ def test_resumo_de_lista_vazia_nao_quebra():
     assert resumo_uma_linha([])
 
 
+# --- produto ja chegou (item 3 do roadmap de agosto) ----------------------
+# Medido em 31/07: 7 casos abertos cujo produto o ML ja marcou como entregue
+# (R$ 847,83). Tres deles em `claim` -- a Maria pode fechar hoje. Sem essa
+# marca, ela nao tem como saber que o pacote esta na mao dela.
+
+def test_produto_entregue_ganha_marca():
+    md = montar_canvas_quadro(
+        [_row(tracking_status="delivered")], "31/07")
+    assert "chegou" in md.lower()
+
+
+def test_produto_a_caminho_nao_ganha_marca():
+    md = montar_canvas_quadro([_row(tracking_status="shipped")], "31/07")
+    assert "chegou" not in md.lower()
+
+
+def test_sem_rastreio_nao_ganha_marca():
+    md = montar_canvas_quadro([_row(tracking_status=None)], "31/07")
+    assert "chegou" not in md.lower()
+
+
+def test_produto_que_chegou_vem_antes_dos_outros():
+    """Produto na mao e o mais acionavel de todos: fecha o caso e o dinheiro."""
+    rows = [
+        _row(order_id=111, tracking_status=None,
+             date_created="2026-07-01T10:00:00-03:00"),
+        _row(order_id=222, tracking_status="delivered",
+             date_created="2026-07-30T10:00:00-03:00"),
+    ]
+    md = montar_canvas_quadro(rows, "31/07")
+    assert md.index("222") < md.index("111")
+
+
+def test_marca_aparece_tambem_em_disputa_no_contador():
+    """Caso em disputa com produto entregue continua fora de A Fazer, mas o
+    Aguardando precisa dizer quantos ja tem o produto aqui."""
+    rows = [_row(claim_stage="dispute", tracking_status="delivered")]
+    md = montar_canvas_quadro(rows, "31/07")
+    assert "Aguardando" in md
+    assert "1" in md
+
+
 def test_markdown_valido_sem_none():
     """None vazando para o markdown vira 'None' na tela da Maria."""
     md = montar_canvas_quadro(
