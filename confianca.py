@@ -36,6 +36,18 @@ from typing import Iterable, Optional
 # sucedido.
 DIGITOS_SHIPMENT = 11
 DIGITOS_ORDER_VALIDOS = (10, 16)
+
+# Casos que NAO TEM COMO consertar -- verificado na API em 31/07/2026, um por
+# um. Sem esta lista a invariante ficaria vermelha para sempre por causa de
+# dado que o proprio ML ja nao tem, e invariante que grita sem acao possivel
+# vira ruido que ninguem trata (a licao ja custou caro duas vezes).
+# Entrar aqui exige evidencia; sair, so quando o ML voltar a responder.
+IRRECUPERAVEIS: dict[int, str] = {
+    40627136344: "claim 5074537287, de 2021 — /shipments existe mas não "
+                 "referencia pedido; /orders dá 404",
+    89507585096: "claim 5308227997, de 2024 — shipment e order sumiram "
+                 "da API do ML",
+}
 # Abaixo disto uma variacao de cobertura e ruido de arredondamento, nao queda.
 TOLERANCIA_COBERTURA = 0.5
 
@@ -63,6 +75,32 @@ def cobertura_conciliacao(total: int, conciliados: int) -> float:
     if total <= 0:
         return 100.0
     return min(100.0, 100.0 * conciliados / total)
+
+
+def checar_conciliados_nao_caiu(atual: int, anterior: Optional[int]) -> Optional[Achado]:
+    """A catraca de verdade: o NUMERO de casos conciliados nunca cai.
+
+    Em 31/07/2026 resolver 2.920 shipments fez a cobertura PERCENTUAL cair de
+    9,1% para 7,6% -- nao porque algo piorou, mas porque 2.920 pedidos validos
+    entraram no denominador. A catraca percentual acusou uma correcao
+    bem-sucedida como regressao, que e o alarme falso que ela existe para
+    evitar.
+
+    O absoluto so cai quando ha perda real de dado, entao e ele que serve de
+    portao. O percentual continua sendo publicado como termometro de progresso,
+    mas nao derruba mais o CI sozinho."""
+    if anterior is None:
+        return None
+    if atual >= anterior:
+        return None
+    return Achado(
+        invariante="conciliados_absoluto",
+        severidade="quebra",
+        resumo="Casos conciliados DIMINUIRAM",
+        evidencia=f"eram {anterior}, agora {atual} ({anterior - atual} a menos)",
+        acao=("Dado que ja virou R$ voltou a nao ter saldo. Verifique o ultimo "
+              "job que escreveu em meli_page_saldos ou mexeu em order_id."),
+    )
 
 
 def checar_cobertura_nao_caiu(atual: float, anterior: Optional[float]) -> Optional[Achado]:
@@ -94,7 +132,9 @@ def checar_order_ids_reais(order_ids: Iterable) -> Optional[Achado]:
     validos e NAO podem ser acusados."""
     suspeitos = [o for o in order_ids
                  if o is not None
-                 and len(str(o).strip()) not in DIGITOS_ORDER_VALIDOS]
+                 and len(str(o).strip()) not in DIGITOS_ORDER_VALIDOS
+                 and int(str(o).strip()) not in IRRECUPERAVEIS
+                 if str(o).strip().isdigit()]
     if not suspeitos:
         return None
     shipments = [o for o in suspeitos
@@ -211,10 +251,22 @@ def rodar_bateria() -> tuple[float, list[Achado]]:
             total, conciliados = cur.fetchone()
             cobertura = cobertura_conciliacao(total or 0, conciliados or 0)
 
-            cur.execute("SELECT cobertura FROM confianca_placar "
+            # guarda tambem o ABSOLUTO: e ele que serve de catraca. O
+            # percentual muda quando o denominador cresce (resolver shipments
+            # aumenta o universo de pedidos validos) e acusaria uma correcao
+            # bem-sucedida como regressao.
+            try:
+                cur.execute("ALTER TABLE confianca_placar "
+                            "ADD COLUMN IF NOT EXISTS conciliados INTEGER")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
+            cur.execute("SELECT cobertura, conciliados FROM confianca_placar "
                         "ORDER BY medido_em DESC LIMIT 1")
             linha = cur.fetchone()
             anterior = float(linha[0]) if linha else None
+            anterior_abs = int(linha[1]) if linha and linha[1] is not None else None
 
             # invariantes
             cur.execute("SELECT order_id FROM ml_devolucoes WHERE order_id IS NOT NULL")
@@ -234,14 +286,18 @@ def rodar_bateria() -> tuple[float, list[Achado]]:
             """)
             claims_fechamento = [r[0] for r in cur.fetchall()]
 
-            for a in (checar_cobertura_nao_caiu(cobertura, anterior),
+            # A catraca e o ABSOLUTO. O percentual segue publicado como
+            # termometro de progresso, mas nao derruba o CI sozinho -- ele cai
+            # legitimamente quando o universo cresce.
+            for a in (checar_conciliados_nao_caiu(conciliados or 0, anterior_abs),
                       checar_order_ids_reais(ids),
                       checar_duplicatas(claims_fechamento)):
                 if a:
                     achados.append(a)
 
-            cur.execute("INSERT INTO confianca_placar (cobertura) VALUES (%s)",
-                        (round(cobertura, 2),))
+            cur.execute("INSERT INTO confianca_placar (cobertura, conciliados) "
+                        "VALUES (%s, %s)",
+                        (round(cobertura, 2), conciliados or 0))
             conn.commit()
         return cobertura, achados
     finally:

@@ -12,8 +12,10 @@ vago. A cobertura de conciliacao e uma CATRACA: pode subir, nunca cair.
 import pytest
 
 from confianca import (
+    IRRECUPERAVEIS,
     Achado,
     checar_cobertura_nao_caiu,
+    checar_conciliados_nao_caiu,
     checar_duplicatas,
     checar_order_ids_reais,
     checar_soma_categorias,
@@ -42,6 +44,39 @@ def test_cobertura_nunca_passa_de_cem():
 
 def test_cobertura_que_sobe_nao_gera_achado():
     assert checar_cobertura_nao_caiu(atual=40.0, anterior=13.8) is None
+
+
+# --- catraca sobre o ABSOLUTO, nao sobre o percentual ----------------------
+# 31/07/2026: resolver 2.920 shipments fez a cobertura CAIR de 9,1% para 7,6%
+# -- nao porque algo piorou, mas porque 2.920 pedidos validos entraram no
+# denominador. A catraca percentual acusou uma correcao bem-sucedida como
+# regressao. O numero de casos conciliados (absoluto) so cai quando ha perda
+# de verdade, entao e ele que serve de catraca.
+
+def test_absoluto_que_sobe_nao_gera_achado():
+    assert checar_conciliados_nao_caiu(atual=1372, anterior=1300) is None
+
+
+def test_absoluto_estavel_nao_gera_achado():
+    assert checar_conciliados_nao_caiu(atual=1372, anterior=1372) is None
+
+
+def test_absoluto_que_cai_gera_quebra():
+    a = checar_conciliados_nao_caiu(atual=1200, anterior=1372)
+    assert a is not None and a.severidade == "quebra"
+    assert "172" in a.evidencia
+
+
+def test_primeira_medicao_do_absoluto_nao_compara():
+    assert checar_conciliados_nao_caiu(atual=1372, anterior=None) is None
+
+
+def test_universo_maior_derruba_o_percentual_mas_nao_o_absoluto():
+    """O caso real: 2.920 pedidos entraram no denominador."""
+    # percentual cai...
+    assert checar_cobertura_nao_caiu(atual=7.6, anterior=9.1) is not None
+    # ...mas nenhum caso conciliado foi perdido
+    assert checar_conciliados_nao_caiu(atual=1372, anterior=1372) is None
 
 
 def test_cobertura_que_cai_gera_quebra():
@@ -106,6 +141,26 @@ def test_id_curto_demais_ainda_e_suspeito():
     assert a is not None and a.severidade == "quebra"
 
 
+# --- irrecuperaveis: dado que o proprio ML nao tem mais -------------------
+# Sem isto a invariante fica vermelha para sempre por causa de 2 casos de
+# 2021/2024 que nao ha como consertar -- e invariante que grita sem acao
+# possivel vira ruido que ninguem trata.
+
+def test_caso_irrecuperavel_nao_gera_achado():
+    assert checar_order_ids_reais([40627136344]) is None
+
+
+def test_irrecuperavel_nao_esconde_shipment_novo():
+    """A lista dispensa casos verificados, nao a invariante inteira."""
+    a = checar_order_ids_reais([40627136344, 47536582431])
+    assert a is not None and "1 caso" in a.evidencia
+
+
+def test_todo_irrecuperavel_tem_motivo_escrito():
+    for oid, motivo in IRRECUPERAVEIS.items():
+        assert len(motivo) > 25, f"{oid} sem evidência do porquê"
+
+
 # --- duplicatas ------------------------------------------------------------
 
 def test_sem_duplicata_nao_gera_achado():
@@ -164,3 +219,4 @@ def test_achado_sempre_carrega_acao():
     for a in [checar_order_ids_reais([1]), checar_duplicatas([1, 1]),
               checar_cobertura_nao_caiu(atual=1.0, anterior=50.0)]:
         assert a.acao and len(a.acao) > 10
+
