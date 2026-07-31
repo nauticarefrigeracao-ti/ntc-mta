@@ -870,6 +870,22 @@ def notificar_processos(canal: str = CANAL_PADRAO) -> tuple[int, int]:
     except Exception as exc:
         print(f"slack: erro ao atualizar o Quadro em {canal}: {type(exc).__name__}: {exc}",
               file=sys.stderr)
+
+    # O CANVAS entra no mesmo ciclo -- e isto que faz o Kanban andar sozinho.
+    # Ele e reconstruido do estado atual do banco (por isso `replace`, nao
+    # remendo): quando a Maria responde no ML e o sync traz o novo estado, o
+    # card sai de "A Fazer" na proxima execucao, sem ninguem mexer.
+    # A latencia real e a soma de duas engrenagens: sync do ML (2h) + este
+    # ciclo (5min). Quem manda no atraso e o sync, nao o Canvas.
+    tentadas += 1
+    try:
+        if publicar_canvas(canal):
+            enviadas += 1
+        else:
+            print(f"slack: FALHOU ao atualizar o Canvas em {canal}", file=sys.stderr)
+    except Exception as exc:
+        print(f"slack: erro ao atualizar o Canvas em {canal}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
     if silenciadas:
         print(f"  {silenciadas} caso(s) sem acao possivel ficaram so no Canvas (D3)")
     return tentadas, enviadas
