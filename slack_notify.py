@@ -425,6 +425,83 @@ def _linha_quadro(row: Mapping[str, Any]) -> str:
     return f"• *{titulo}* (SKU {sku}) · _{motivo}_ · <{_link_venda(oid)}|abrir a venda>"
 
 
+def _ordem_por_idade(row: Mapping[str, Any]):
+    """Mais antigo primeiro: quem espera ha mais tempo corre mais risco de
+    estourar prazo. Caso sem data vai para o fim, nao quebra a ordenacao."""
+    d = row.get("date_created")
+    return (d is None, str(d or ""))
+
+
+def resumo_uma_linha(rows) -> str:
+    """Uma frase para o topo do canal: quantos pedem acao AGORA."""
+    n = sum(1 for r in rows if classificar_kanban(r) == "a_fazer")
+    if n == 0:
+        return "Nada pendente da sua parte agora."
+    if n == 1:
+        return "1 caso esperando você responder no Mercado Livre."
+    return f"{n} casos esperando você responder no Mercado Livre."
+
+
+def montar_canvas_quadro(rows, data_str: str,
+                         saldo_dia: Optional[float] = None) -> str:
+    """Markdown do Canvas fixo do #sac -- o cockpit da Maria.
+
+    A diferenca para um mural: A FAZER e listado caso a caso, com valor e
+    link; AGUARDANDO e FEITO viram CONTADOR. Medido em 31/07, so 8% do que
+    ela ve exige acao dela (3 de 40) -- listar os 37 restantes recriaria
+    exatamente o afogamento que este quadro veio resolver.
+    """
+    a_fazer, aguardando, feito = [], [], []
+    for r in rows:
+        col = classificar_kanban(r)
+        (a_fazer if col == "a_fazer" else
+         aguardando if col == "aguardando" else feito).append(r)
+
+    a_fazer.sort(key=_ordem_por_idade)
+
+    L = [f"# 🗂️ Quadro do SAC — {data_str}", ""]
+
+    # ── A FAZER: o unico bloco com detalhe ────────────────────────────────
+    L.append(f"## 🔴 A Fazer — {len(a_fazer)}")
+    if not a_fazer:
+        L.append("_Nada pendente da sua parte agora._")
+    else:
+        L.append("_Responda no Mercado Livre. O prazo está correndo._")
+        L.append("")
+        for r in a_fazer:
+            titulo = (r.get("item_title") or "Produto").strip() or "Produto"
+            if len(titulo) > 60:
+                titulo = titulo[:59].rstrip() + "…"
+            sku = r.get("item_sku") or "—"
+            motivo = motivo_humano(r.get("reason_label"))
+            oid = r.get("order_id")
+            total = r.get("order_total")
+            valor = f" · {_fmt_brl(total)}" if total else ""
+            L.append(f"- **{titulo}**")
+            L.append(f"  SKU {sku} · _{motivo}_{valor}")
+            if oid:
+                L.append(f"  [Abrir a venda {oid}]({_link_venda(oid)})")
+    L.append("")
+
+    # ── AGUARDANDO: contador, nao lista ───────────────────────────────────
+    L.append(f"## 🟡 Aguardando — {len(aguardando)}")
+    L.append("_O Mercado Livre está arbitrando ou o produto está a caminho. "
+             "Só acompanhar._")
+    L.append("")
+
+    # ── FEITO ─────────────────────────────────────────────────────────────
+    L.append(f"## 🟢 Feito — {len(feito)}")
+    if saldo_dia is not None:
+        L.append(f"_Saldo do período: {_fmt_brl(saldo_dia)}_")
+    else:
+        L.append("_Casos encerrados. O balanço em R$ sai no #sac-fechamento._")
+    L.append("")
+    L.append("---")
+    L.append(f"_Atualizado automaticamente · {data_str}_")
+
+    return "\n".join(L)
+
+
 def montar_quadro(rows, data_str: str) -> tuple[str, list[dict]]:
     """Monta o 'Quadro do SAC' — visao Kanban do dia. A FAZER e listado (o
     que a Maria precisa AGIR, com CTA); AGUARDANDO e FEITO viram contadores
@@ -776,6 +853,108 @@ def _save_board_ts(cur, canal: str, ts: str, channel_id: str) -> None:
     )
 
 
+_DDL_CANVAS = """
+CREATE TABLE IF NOT EXISTS slack_canvas (
+    channel_id TEXT PRIMARY KEY,
+    canvas_id  TEXT NOT NULL,
+    criado_em  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+
+def _resolver_channel_id(canal: str) -> Optional[str]:
+    """Aceita '#sac' ou um id ja resolvido. A API de Canvas exige o ID."""
+    if not canal:
+        return None
+    if not canal.startswith("#"):
+        return canal
+    nome = canal.lstrip("#")
+    dados = slack_client.listar_canais()
+    for c in dados or []:
+        if c.get("name") == nome:
+            return c.get("id")
+    return None
+
+
+def publicar_canvas(canal: str = CANAL_PADRAO) -> bool:
+    """Cria (uma vez) e mantem atualizado o Canvas fixo do canal.
+
+    Por que Canvas e nao mensagem: mensagem some no rolar. Medido em
+    31/07/2026, apenas 8% do que a Maria ve exige acao dela (3 de 40) -- num
+    mural, esses 3 ficam soterrados pelos 37 que so aguardam o ML. O Canvas
+    fica no topo, no mesmo lugar, e e reescrito a cada ciclo.
+
+    O canvas_id e guardado em slack_canvas: um canal tem UM canvas proprio, e
+    tentar criar de novo falharia. Se a linha sumir, recria."""
+    from src.db.connection import get_db_connection, dict_cursor
+
+    channel_id = _resolver_channel_id(canal)
+    if not channel_id:
+        print(f"canvas: nao consegui resolver o canal {canal}", file=sys.stderr)
+        return False
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_DDL_CANVAS)
+            conn.commit()
+
+        with dict_cursor(conn) as cur:
+            cur.execute("""
+                SELECT claim_id, order_id, claim_status, claim_stage,
+                       reason_label, item_title, item_sku, order_total,
+                       date_created
+                FROM ml_devolucoes
+                WHERE claim_status = 'opened'
+                   OR (claim_status = 'closed'
+                       AND date_updated ~ '^[0-9]{4}-'
+                       AND date_updated::timestamptz > NOW() - interval '24 hours')
+                ORDER BY date_updated DESC NULLS LAST
+                LIMIT 300
+            """)
+            rows = cur.fetchall()
+
+        data_str = datetime.now(timezone.utc).strftime("%d/%m")
+        markdown = montar_canvas_quadro(rows, data_str)
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT canvas_id FROM slack_canvas WHERE channel_id = %s",
+                        (channel_id,))
+            linha = cur.fetchone()
+
+        canvas_id = linha[0] if linha else None
+        if canvas_id:
+            if slack_client.canvas_editar(canvas_id, markdown):
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE slack_canvas SET atualizado_em = "
+                                "CURRENT_TIMESTAMP WHERE channel_id = %s",
+                                (channel_id,))
+                conn.commit()
+                return True
+            # canvas sumiu (apagado a mao) -- limpa e recria abaixo
+            print("canvas: edicao falhou, recriando", file=sys.stderr)
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM slack_canvas WHERE channel_id = %s",
+                            (channel_id,))
+            conn.commit()
+
+        novo = slack_client.canvas_criar(channel_id, markdown)
+        if not novo:
+            print("canvas: FALHOU ao criar", file=sys.stderr)
+            return False
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO slack_canvas (channel_id, canvas_id) VALUES (%s,%s) "
+                "ON CONFLICT (channel_id) DO UPDATE SET canvas_id=EXCLUDED.canvas_id,"
+                " atualizado_em=CURRENT_TIMESTAMP",
+                (channel_id, novo))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
 def publicar_quadro(canal: str = CANAL_PADRAO) -> bool:
     """Publica/atualiza o Quadro Kanban do SAC no canal. Se ja existe um quadro,
     ATUALIZA in-place (chat.update) em vez de postar outro — o canal nao vira um
@@ -901,6 +1080,7 @@ def main() -> None:
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--resumo-diario", action="store_true", dest="resumo")
     ap.add_argument("--quadro", action="store_true", help="publica/atualiza o Quadro Kanban")
+    ap.add_argument("--canvas", action="store_true", help="cria/atualiza o Canvas fixo do canal")
     ap.add_argument("--canal", default=CANAL_PADRAO,
                     help=f"canal do Slack (default {CANAL_PADRAO})")
     args = ap.parse_args()
@@ -911,6 +1091,11 @@ def main() -> None:
         sys.exit(1)
     if args.test:
         teste(args.canal)
+    if args.canvas:
+        ok = publicar_canvas(args.canal)
+        print("canvas atualizado" if ok else "canvas: FALHOU")
+        if not ok:
+            sys.exit(1)
     if args.quadro:
         ok = publicar_quadro(args.canal)
         print("✓ quadro atualizado" if ok else "quadro: FALHOU", file=sys.stderr if not ok else None)
@@ -937,3 +1122,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

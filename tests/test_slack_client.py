@@ -218,6 +218,68 @@ def test_update_payload_contem_ts_e_channel_corretos():
     assert captured["body"]["text"] == "novo texto"
 
 
+# --- canvas ---------------------------------------------------------------
+
+def test_canvas_criar_devolve_id():
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen",
+                   return_value=_fake_response({"ok": True, "canvas_id": "F123"})):
+            assert slack_client.canvas_criar("C1", "# oi") == "F123"
+
+
+def test_canvas_criar_sem_token_nao_chama_rede():
+    with patch.object(slack_client, "_token", return_value=None):
+        with patch("urllib.request.urlopen") as m:
+            assert slack_client.canvas_criar("C1", "# oi") is None
+            m.assert_not_called()
+
+
+def test_canvas_criar_falha_logica_devolve_none():
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen", return_value=_fake_response(
+                {"ok": False, "error": "missing_scope"})):
+            assert slack_client.canvas_criar("C1", "# oi") is None
+
+
+def test_canvas_editar_usa_replace():
+    """O quadro e reconstruido do banco a cada ciclo -- remendar secao criaria
+    divergencia entre tela e dado."""
+    captured = {}
+
+    def fake(req, timeout=20):
+        captured["body"] = json.loads(req.data)
+        return _fake_response({"ok": True})
+
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen", side_effect=fake):
+            assert slack_client.canvas_editar("F123", "# novo") is True
+    assert captured["body"]["canvas_id"] == "F123"
+    assert captured["body"]["changes"][0]["operation"] == "replace"
+
+
+def test_canvas_editar_falha_devolve_false():
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen", return_value=_fake_response(
+                {"ok": False, "error": "canvas_not_found"})):
+            assert slack_client.canvas_editar("F123", "# x") is False
+
+
+def test_canvas_respeita_retry_em_429():
+    chamadas, esperas = [], []
+
+    def fake(req, timeout=20):
+        chamadas.append(1)
+        if len(chamadas) == 1:
+            raise _http_error(429, {"Retry-After": "2"})
+        return _fake_response({"ok": True, "canvas_id": "F9"})
+
+    with patch.object(slack_client, "_token", return_value="xoxb-x"):
+        with patch("urllib.request.urlopen", side_effect=fake):
+            r = slack_client.canvas_criar("C1", "# oi", sleep_fn=esperas.append)
+    assert r == "F9"
+    assert esperas == [2.0]
+
+
 def test_update_429_retry_after():
     chamadas, esperas = [], []
 

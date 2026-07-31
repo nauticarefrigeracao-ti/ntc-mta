@@ -193,6 +193,112 @@ def garantir_canal(nome: str) -> Optional[str]:
     return cid
 
 
+_API_CANVAS_CREATE = "https://slack.com/api/conversations.canvases.create"
+_API_CANVAS_EDIT = "https://slack.com/api/canvases.edit"
+
+
+def _post_json(url: str, payload: dict, *, max_retries: int = 3,
+               sleep_fn: Callable[[float], None] = time.sleep) -> Optional[dict]:
+    """POST autenticado com o mesmo retry/backoff do post_message.
+
+    Extraido para as chamadas de Canvas nao repetirem a politica de retry --
+    e para uma correcao nela valer para todas.
+    """
+    tok = _token()
+    if not tok:
+        return None
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Authorization": f"Bearer {tok}",
+    }
+    data = json.dumps(payload).encode("utf-8")
+    tentativa = 0
+    backoff = 0.5
+    while True:
+        req = urllib.request.Request(url, data=data, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                body = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and tentativa < max_retries:
+                try:
+                    espera = float(exc.headers.get("Retry-After", 1)) if exc.headers else 1.0
+                except Exception:
+                    espera = 1.0
+                sleep_fn(espera)
+                tentativa += 1
+                continue
+            if 500 <= exc.code < 600 and tentativa < max_retries:
+                sleep_fn(backoff)
+                backoff *= 2
+                tentativa += 1
+                continue
+            return None
+        except Exception:
+            if tentativa < max_retries:
+                sleep_fn(backoff)
+                backoff *= 2
+                tentativa += 1
+                continue
+            return None
+        if not body.get("ok"):
+            import sys
+            print(f"[{url.rsplit('/', 1)[-1]} FALHOU] error={body.get('error')}",
+                  file=sys.stderr)
+            return None
+        return body
+
+
+_API_CONV_LIST = "https://slack.com/api/conversations.list"
+
+
+def listar_canais(limit: int = 200) -> Optional[list]:
+    """Canais publicos do workspace. Necessario para converter '#sac' no ID
+    que a API de Canvas exige."""
+    tok = _token()
+    if not tok:
+        return None
+    url = f"{_API_CONV_LIST}?types=public_channel&limit={limit}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = json.loads(resp.read())
+    except Exception:
+        return None
+    if not body.get("ok"):
+        import sys
+        print(f"[conversations.list FALHOU] error={body.get('error')}",
+              file=sys.stderr)
+        return None
+    return body.get("channels") or []
+
+
+def canvas_criar(channel_id: str, markdown: str, **kw) -> Optional[str]:
+    """Cria o Canvas do canal e devolve o canvas_id. Um canal so tem UM canvas
+    proprio: chamar de novo num canal que ja tem devolve erro, por isso quem
+    chama guarda o id."""
+    r = _post_json(_API_CANVAS_CREATE, {
+        "channel_id": channel_id,
+        "document_content": {"type": "markdown", "markdown": markdown},
+    }, **kw)
+    return r.get("canvas_id") if r else None
+
+
+def canvas_editar(canvas_id: str, markdown: str, **kw) -> bool:
+    """Substitui o conteudo inteiro do Canvas. `replace` e proposital: o
+    quadro e reconstruido do estado atual do banco a cada ciclo, entao
+    remendar secao a secao so criaria divergencia entre o que esta na tela e
+    o que esta no banco."""
+    r = _post_json(_API_CANVAS_EDIT, {
+        "canvas_id": canvas_id,
+        "changes": [{
+            "operation": "replace",
+            "document_content": {"type": "markdown", "markdown": markdown},
+        }],
+    }, **kw)
+    return bool(r)
+
+
 _API_UPDATE = "https://slack.com/api/chat.update"
 
 
