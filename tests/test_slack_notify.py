@@ -361,6 +361,29 @@ def test_motivo_codigo_desconhecido_tem_fallback_legivel():
     assert "1234" not in out and out
 
 
+def test_notificacao_individual_nao_mostra_codigo_cru():
+    """Achado no #sac em 31/07: a Maria recebeu "Motivo: PDD9952".
+
+    motivo_humano() existia mas so era aplicado no Quadro -- a notificacao
+    individual, que e o que ela mais le, mostrava o codigo do ML. Codigo cru
+    obriga a decorar tabela e some com a informacao."""
+    texto, blocos = montar_mensagem(_row(reason_label="PDD9952"))
+    assert "PDD9952" not in texto
+    assert "Problema com o produto" in texto
+    assert "PDD9952" not in str(blocos)
+
+
+def test_lembrete_tambem_traduz_o_motivo():
+    texto, blocos = montar_mensagem_lembrete(_row(reason_label="PNR3837"))
+    assert "PNR3837" not in texto
+    assert "Produto não recebido" in texto
+
+
+def test_motivo_que_ja_e_humano_continua_igual():
+    texto, _ = montar_mensagem(_row(reason_label="Produto não funciona"))
+    assert "Produto não funciona" in texto
+
+
 def test_motivo_vazio_tem_texto():
     assert motivo_humano("") == "Motivo não informado"
     assert motivo_humano(None) == "Motivo não informado"

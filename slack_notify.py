@@ -274,7 +274,7 @@ def montar_mensagem_lembrete(row: Mapping[str, Any], agora: Optional[datetime] =
     categoria = categorizar(row)
     titulo = row.get("item_title") or "Produto"
     sku = row.get("item_sku") or "—"
-    motivo = row.get("reason_label") or "nao informado"
+    motivo = motivo_humano(row.get("reason_label"))
     oid = row.get("order_id")
     linhas = [
         f"*Ainda sem resposta* — {categoria}",
@@ -307,7 +307,9 @@ def montar_mensagem(row: Mapping[str, Any], saldo: Optional[float] = None,
     categoria = categorizar(row)
     titulo = row.get("item_title") or "Produto"
     sku = row.get("item_sku") or "—"
-    motivo = row.get("reason_label") or "não informado"
+    # motivo_humano e nao o rotulo cru: em 31/07 a Maria recebeu
+    # "Motivo: PDD9952" no #sac. A traducao existia, mas so o Quadro usava.
+    motivo = motivo_humano(row.get("reason_label"))
     oid = row.get("order_id")
 
     linhas = [
