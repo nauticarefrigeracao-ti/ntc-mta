@@ -26,7 +26,7 @@ O que estes testes travam:
 """
 import pytest
 
-from vigia import vigiar
+from vigia import ciclo_de_comando, vigiar
 
 
 class Relogio:
@@ -137,14 +137,69 @@ def test_a_cadencia_padrao_e_a_prometida_ao_negocio():
     assert vigia.INTERVALO_PADRAO_SEG == 300
 
 
-def test_o_workflow_chama_o_vigia_e_nao_o_once():
-    """Regressão: se alguém voltar o workflow para `--once`, a latência volta
-    para ~97 min sem que nada fique vermelho. O gate tem que ser aqui."""
+def test_o_workflow_chama_o_vigia():
+    """Regressão: se alguém tirar o vigia do workflow, a latência volta para
+    ~97 min sem que nada fique vermelho. O gate tem que ser aqui."""
     from pathlib import Path
     wf = (Path(__file__).parent.parent / ".github" / "workflows" /
           "notify_slack.yml").read_text(encoding="utf-8")
     assert "vigia.py" in wf
-    assert "slack_notify.py --once" not in wf
+
+
+# --- o ciclo como comando --------------------------------------------------
+# O arquivo é COMPARTILHADO entre B.I e ntc-mta (harness/sincronia.py), e cada
+# repo cicla um comando diferente. Por isso o ciclo é uma linha de comando, e
+# não um import: assim o arquivo fica idêntico dos dois lados.
+
+class _Resultado:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+
+def test_comando_que_passa_nao_levanta():
+    chamadas = []
+
+    def exec_ok(argv, **kw):
+        chamadas.append(argv)
+        return _Resultado(0)
+
+    ciclo_de_comando("python slack_notify.py --once", executar=exec_ok)()
+    assert chamadas == [["python", "slack_notify.py", "--once"]]
+
+
+def test_saida_nao_zero_vira_falha_do_ciclo():
+    """Sem isto o laço rodaria 5h30 com o comando quebrado e sairia verde."""
+    with pytest.raises(RuntimeError, match="código 2"):
+        ciclo_de_comando("python x.py", executar=lambda a, **k: _Resultado(2))()
+
+
+def test_comando_vazio_e_erro_na_partida():
+    """Descobrir isso às 5h29 do laço é tarde demais."""
+    with pytest.raises(ValueError):
+        ciclo_de_comando("   ")
+
+
+def test_comando_com_aspas_e_quebrado_como_shell():
+    chamadas = []
+    ciclo_de_comando('python a.py --canal "#sac teste"',
+                     executar=lambda a, **k: (chamadas.append(a),
+                                              _Resultado(0))[1])()
+    assert chamadas[0] == ["python", "a.py", "--canal", "#sac teste"]
+
+
+def test_comando_que_falha_e_retentado_no_ciclo_seguinte():
+    """O caso real: Neon dormiu num ciclo, acordou no próximo."""
+    r, n = Relogio(), []
+
+    def executar(argv, **kw):
+        n.append(1)
+        return _Resultado(1 if len(n) == 1 else 0)
+
+    codigo = vigiar(minutos=10, intervalo_seg=300,
+                    ciclo=ciclo_de_comando("python x.py", executar=executar),
+                    agora=r.agora, dormir=r.dormir)
+    assert len(n) == 3, "o laço tinha que seguir depois da falha"
+    assert codigo == 1, "mas o run precisa terminar vermelho"
 
 
 def test_o_timeout_do_job_cabe_a_janela_do_vigia():

@@ -64,4 +64,4 @@ jobs:
         run: |
           python vigia.py \
             --minutos "${{ github.event.inputs.minutos || '330' }}" \
-            --canal   "${{ github.event.inputs.canal   || '#sac' }}"
+            --comando "python slack_notify.py --once --canal '${{ github.event.inputs.canal || '#sac' }}'"
