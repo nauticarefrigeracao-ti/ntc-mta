@@ -101,6 +101,28 @@ def resumir_mes(casos: Iterable[Mapping[str, Any]]) -> dict:
     }
 
 
+def meses_a_publicar(hoje: Optional[datetime] = None,
+                     quantos: int = 2) -> list[tuple[int, int]]:
+    """Os meses que a rodada de hoje reabre, do mais recente para o mais antigo.
+
+    Por que mais de um: a apuração de saldo do Mercado Livre chega DEPOIS do
+    caso encerrar. Em 03/08/2026, julho ainda tinha 72 de 292 casos (25%) sem
+    saldo. Publicar só uma vez, no dia 1, congelaria o mês num número parcial
+    — e o chefe leria como fechado o que ainda ia mudar.
+    """
+    if quantos < 1:
+        raise ValueError("quantos precisa ser >= 1 — rodada que publica zero "
+                         "meses sai verde sem ter feito nada")
+    hoje = hoje or datetime.now(timezone.utc)
+    saida, ano, mes = [], hoje.year, hoje.month
+    for _ in range(quantos):
+        saida.append((ano, mes))
+        mes -= 1
+        if mes == 0:
+            ano, mes = ano - 1, 12
+    return saida
+
+
 def variacao(atual: float, anterior: float) -> Optional[float]:
     """Variação percentual. None quando a base é zero — dividir por zero para
     exibir '∞%' não informa nada."""
@@ -273,25 +295,36 @@ def publicar(ano: int, mes: int, canal: str = CANAL_FECHAMENTO) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mes", help="AAAA-MM (padrão: mês anterior)")
+    ap.add_argument("--mes", help="AAAA-MM (um mês específico)")
+    ap.add_argument("--meses", type=int, default=2,
+                    help="quantos meses reabrir a partir do corrente "
+                         "(padrão 2: o mês em curso e o anterior, que ainda "
+                         "recebe saldo atrasado)")
     ap.add_argument("--canal", default=CANAL_FECHAMENTO)
     ap.add_argument("--dry-run", action="store_true",
                     help="mostra o markdown sem publicar")
     args = ap.parse_args()
 
     if args.mes:
-        ano, mes = (int(x) for x in args.mes.split("-"))
+        alvos = [tuple(int(x) for x in args.mes.split("-"))]
     else:
-        hoje = datetime.now(timezone.utc)
-        ano, mes = (hoje.year - 1, 12) if hoje.month == 1 else (hoje.year,
-                                                                hoje.month - 1)
+        alvos = meses_a_publicar(quantos=args.meses)
 
     if args.dry_run:
-        resumo, historico = coletar_mes(ano, mes)
-        print(montar_canvas_mensal(nome_do_mes(ano, mes), resumo, historico))
+        for ano, mes in alvos:
+            resumo, historico = coletar_mes(ano, mes)
+            print(montar_canvas_mensal(nome_do_mes(ano, mes), resumo, historico))
+            print()
         return 0
 
-    return 0 if publicar(ano, mes, args.canal) else 1
+    # FALHAR ALTO: um mês que não publicou não pode ser encoberto pelo outro
+    # que publicou. A rodada segue (o mês seguinte ainda vale), mas sai 1.
+    falhou = False
+    for ano, mes in alvos:
+        if not publicar(ano, mes, args.canal):
+            print(f"balanco: FALHOU em {nome_do_mes(ano, mes)}", file=sys.stderr)
+            falhou = True
+    return 1 if falhou else 0
 
 
 if __name__ == "__main__":

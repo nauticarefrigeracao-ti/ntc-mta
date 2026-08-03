@@ -1,0 +1,64 @@
+name: Balanco Mensal do SAC
+
+# O balanco do mes nao pode depender de alguem lembrar de rodar.
+#
+# POR QUE DIARIO, E NAO NO DIA 1: a apuracao de saldo do Mercado Livre chega
+# DEPOIS que o caso encerra. Em 03/08/2026, julho ainda tinha 72 de 292 casos
+# (25%) sem saldo. Um Canvas publicado no dia 1 congelaria o mes num numero
+# parcial -- e o chefe leria como fechado o que ainda ia mudar.
+#
+# A publicacao e idempotente: um Canvas por mes (chaveado `canal:AAAA-MM` em
+# slack_canvas_mensal), reescrito a cada rodada. Reabrimos o mes corrente e o
+# anterior; o Canvas traz a cobertura declarada em cima, entao o leitor sempre
+# sabe o quanto do numero ja esta apurado.
+#
+# O que este job NAO resolve: a coleta de saldo em si e RPA com sessao de
+# navegador do Mercado Livre -- roda na maquina do Lucas, nao aqui. Se ela
+# parar, este job continua publicando, so que com cobertura caindo. Quem grita
+# nesse caso e a invariante `checar_coleta_saldos` (confianca.yml), que cobra
+# a coleta quando passa de 7 dias sem rodar.
+
+on:
+  schedule:
+    - cron: '0 11 * * *'   # ~08:00 BRT (o Actions atrasa; para relatorio, tudo bem)
+  workflow_dispatch:
+    inputs:
+      mes:
+        description: 'Mes especifico AAAA-MM (vazio = corrente + anterior)'
+        required: false
+      canal:
+        description: 'Canal do Slack'
+        required: false
+        default: '#sac-fechamento'
+
+concurrency:
+  group: balanco-mensal
+  cancel-in-progress: false
+
+jobs:
+  balanco:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Publicar o balanco no Canvas
+        env:
+          ML_NEON_URL: ${{ secrets.ML_NEON_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          if [ -n "${{ github.event.inputs.mes }}" ]; then
+            python balanco_mensal.py --mes "${{ github.event.inputs.mes }}" \
+              --canal "${{ github.event.inputs.canal || '#sac-fechamento' }}"
+          else
+            python balanco_mensal.py --meses 2 \
+              --canal "${{ github.event.inputs.canal || '#sac-fechamento' }}"
+          fi
