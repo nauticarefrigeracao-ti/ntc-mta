@@ -1,14 +1,41 @@
 name: Notificador Slack do SAC
 
+# O CRON NAO E UM CONTRATO -- MEDIDO, NAO SUPOSTO.
+#
+# Este workflow pedia `*/5`. Em 03/08/2026 medimos 60 runs (30/07 12:17 ->
+# 03/08 11:24):
+#     intervalo medio  97 min     menor 52 min     maior 219 min
+#     runs por hora    0,6                         esperado 12
+# Nenhum intervalo abaixo de 30 min. A latencia de ~25 min prometida ao
+# negocio nunca existiu: a Maria era avisada entre 1h e 3h40 depois.
+#
+# Correcao: o cron vira so a PARTIDA. Cada run entra num laco de 5h30
+# executando o ciclo a cada 5 minutos (vigia.py). O repo e publico, entao
+# minuto de Actions e livre -- o que seria caro em plano pago aqui nao custa.
+#
+# Por que o cron de 2h: a janela do run e 5h30. Enquanto uma partida chegar
+# dentro desse prazo, a cobertura e continua. Mesmo com o dobro do atraso
+# medido, 2h vira ~4h -- ainda dentro da janela.
+
 on:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch: {}
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      minutos:
+        description: 'Duracao da janela em minutos'
+        required: false
+        default: '330'
+      canal:
+        description: 'Canal do Slack'
+        required: false
+        default: '#sac'
 
 # Serializa: nunca dois notificadores rodando ao mesmo tempo (evita corrida
 # entre post_message e o INSERT em slack_notificados -> mensagem duplicada no
 # #sac). cancel-in-progress=false: o novo espera o atual terminar, nunca corta
-# um envio pela metade.
+# um envio pela metade. Com a janela de 5h30, a partida seguinte fica pendente
+# e assume no instante em que a atual encerra -- cobertura sem buraco.
 concurrency:
   group: notify-slack-sac
   cancel-in-progress: false
@@ -16,6 +43,9 @@ concurrency:
 jobs:
   notify:
     runs-on: ubuntu-latest
+    # 5h30 de laco + folga para checkout/pip. O default do GitHub e 6h e mata
+    # o job no meio de um envio; este teto encerra antes, de forma limpa.
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -27,8 +57,11 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
-      - name: Notificar processos novos/atualizados no #sac
+      - name: Vigiar o SAC (ciclo de 5 min durante a janela)
         env:
           ML_NEON_URL: ${{ secrets.ML_NEON_URL }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-        run: python slack_notify.py --once
+        run: |
+          python vigia.py \
+            --minutos "${{ github.event.inputs.minutos || '330' }}" \
+            --canal   "${{ github.event.inputs.canal   || '#sac' }}"

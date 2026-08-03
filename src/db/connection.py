@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
-from typing import Generator
+from typing import Generator, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import psycopg2
@@ -63,8 +63,32 @@ def get_db_connection() -> psycopg2.extensions.connection:
 
     Chamar conn.close() ao terminar — o PgBouncer recicla a conexão.
     Preferir o context manager db_conn() para garantir commit/rollback/close.
+
+    RETRY POR COLD START: o Neon suspende o compute por inatividade, e a
+    primeira conexão depois disso pode estourar o timeout enquanto a instância
+    acorda. Em 02/08/2026, às 03h49, isso derrubou um run inteiro do
+    notificador com `timeout expired` — a Maria não foi avisada naquele ciclo.
+    Não é erro de credencial nem de rede: é uma espera que passa sozinha.
+    Três tentativas com espera crescente cobrem o wake-up típico sem mascarar
+    falha real — DSN errado ou senha inválida continua estourando de primeira.
     """
-    return psycopg2.connect(_get_dsn(), connect_timeout=10)
+    import time as _time
+
+    ultimo: Optional[Exception] = None
+    for tentativa in range(3):
+        try:
+            return psycopg2.connect(_get_dsn(), connect_timeout=15)
+        except psycopg2.OperationalError as exc:
+            msg = str(exc).lower()
+            if not any(p in msg for p in ("timeout", "could not connect",
+                                          "connection refused",
+                                          "server closed the connection",
+                                          "could not translate host")):
+                raise
+            ultimo = exc
+            if tentativa < 2:
+                _time.sleep(2 * (tentativa + 1))  # 2s, depois 4s
+    raise ultimo  # type: ignore[misc]
 
 
 def release_connection(conn: psycopg2.extensions.connection) -> None:
