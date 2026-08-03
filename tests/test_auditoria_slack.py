@@ -251,6 +251,22 @@ def test_o_resumo_diz_o_canal():
     assert "#sac-fechamento" in r["texto"]
 
 
+def test_canvas_ilegivel_nao_passa_como_auditado():
+    """03/08: `files.list` respondeu missing_scope, a auditoria mostrou
+    "canvas encontrados: 0" e mesmo assim aprovou o canal. Zero por cegueira
+    não é zero por ausência — e o chefe vai abrir justamente o Canvas."""
+    r = resumir_auditoria(canal="#sac-fechamento", duplicados=[], faltando=[],
+                          divergentes=[], lidos=19, canvas_ilegivel=True)
+    assert r["ok"] is False
+    assert "escopo" in r["texto"].lower() or "ler" in r["texto"].lower()
+
+
+def test_canvas_legivel_nao_reprova_por_isso():
+    r = resumir_auditoria(canal="#sac", duplicados=[], faltando=[],
+                          divergentes=[], lidos=19, canvas_ilegivel=False)
+    assert r["ok"] is True
+
+
 def test_canal_sem_nada_lido_nao_passa_como_limpo():
     """Ler zero mensagens e reportar 'sem divergência' foi exatamente como um
     validador deu OK numa tela de login. Ausência de dado não é aprovação."""

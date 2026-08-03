@@ -131,9 +131,36 @@ def variacao(atual: float, anterior: float) -> Optional[float]:
     return round(100.0 * (atual - anterior) / abs(anterior), 1)
 
 
+def fmt_cobertura(pct: float, faltando: int) -> str:
+    """Cobertura como texto — nunca "100%" com caso faltando.
+
+    291 de 292 é 99,66%, e `:.0f` arredondava para "100%" enquanto o texto
+    logo abaixo dizia "os outros 1 entram quando a conciliação fechar". Duas
+    frases contraditórias na mesma seção. É uma mentira pequena — e é sempre
+    a pequena que alguém confere.
+    """
+    if faltando <= 0:
+        return "100%"
+    # Vírgula decimal: o texto é lido em português, por quem confere em reais.
+    return f"{min(pct, 99.9):.1f}".replace(".", ",") + "%"
+
+
 def montar_canvas_mensal(mes_label: str, r: Mapping[str, Any],
                          historico: list) -> str:
-    """Markdown do Canvas mensal."""
+    """Markdown do Canvas mensal.
+
+    O TITULAR É O PREJUÍZO, não um "saldo".
+    A versão anterior somava `prejuizo + revertido` e publicava
+    "🟢 Saldo do mês: R$ 15.826,44" para julho/2026. Medindo o que é um
+    `total > 0` na página do Mercado Livre:
+
+        pedido …126735890 | produto 1.380,97 | cancelamentos 0,00 | +1.164,12
+
+    Cancelamentos zerados: a venda FICOU DE PÉ. Houve reclamação, não houve
+    devolução, o dinheiro entrou como em qualquer venda. Isso é receita, não
+    ganho do SAC. Somado ao prejuízo, dizia à diretoria que a área de
+    devoluções é lucrativa — e é em cima disso que ele decide.
+    """
     def brl(v):
         return _fmt_brl(v) if v is not None else "—"
 
@@ -143,49 +170,80 @@ def montar_canvas_mensal(mes_label: str, r: Mapping[str, Any],
         L.append("_Nenhum caso encerrado neste mês._")
         return "\n".join(L)
 
-    saldo = r.get("saldo")
-    sinal = "🟢" if (saldo or 0) >= 0 else "🔴"
-    L.append(f"## {sinal} Saldo do mês: **{brl(saldo)}**")
+    prejuizo = abs(float(r.get("prejuizo") or 0))
+    neg = r.get("negativos") or 0
+    sem_custo = (r.get("casos") or 0) - neg
+    if neg:
+        # Sem o sinal de menos: a palavra "Prejuízo" já diz a direção, e
+        # "Prejuízo: R$ -6.102,43" é negativo duplo para quem lê.
+        L.append(f"## 🔴 Prejuízo do mês: **{brl(prejuizo)}**")
+        L.append("")
+        L.append(f"Em **{neg}** dos {r['casos']} casos encerrados. "
+                 f"Os outros **{sem_custo}** não custaram nada.")
+    else:
+        L.append("## ⚪ Sem prejuízo no mês")
+        L.append("")
+        L.append(f"Nenhum caso custou dinheiro entre os {r['casos']} "
+                 f"encerrados.")
     L.append("")
 
     L.append("| | |")
     L.append("|---|---|")
     L.append(f"| Casos encerrados | **{r['casos']}** |")
-    L.append(f"| Receita das vendas | {brl(r.get('receita'))} |")
-    L.append(f"| Prejuízo confirmado | {brl(r.get('prejuizo'))} |")
-    L.append(f"| Revertido a favor | {brl(r.get('revertido'))} |")
+    L.append(f"| Prejuízo confirmado | **{brl(prejuizo)}** |")
+    L.append(f"| Receita das vendas envolvidas | {brl(r.get('receita'))} |")
     L.append(f"| Reembolsado pelo ML | {brl(r.get('reembolsado'))} |")
     L.append("")
 
     L.append("## Como os casos terminaram")
-    L.append(f"- 🔴 **{r['negativos']}** com prejuízo — {brl(r.get('prejuizo'))}")
+    L.append(f"- 🔴 **{r['negativos']}** custaram dinheiro — {brl(prejuizo)}")
     L.append(f"- ⚪ **{r['zerados']}** o Mercado Livre cobriu (saldo zero)")
-    L.append(f"- 🟢 **{r['revertidos']}** revertidos a favor — {brl(r.get('revertido'))}")
+    L.append(f"- 🟢 **{r['revertidos']}** a venda ficou de pé, sem devolução — "
+             f"{brl(r.get('revertido'))} recebidos normalmente")
+    L.append("")
+    L.append("_A última linha é receita de venda, não ganho da disputa: "
+             "houve reclamação, não houve devolução._")
     L.append("")
 
     # Cobertura: o número é parcial? Diga antes que alguém descubra.
     cob = float(r.get("cobertura_pct") or 0)
+    faltando = int(r.get("sem_saldo") or 0)
     L.append("## Confiança do número")
     if cob >= COBERTURA_MINIMA:
-        L.append(f"**{cob:.0f}% dos casos** já têm o saldo apurado no Mercado "
-                 f"Livre. Os outros {r['sem_saldo']} entram quando a "
-                 f"conciliação fechar.")
+        txt = f"**{fmt_cobertura(cob, faltando)} dos casos** já têm o saldo " \
+              f"apurado no Mercado Livre."
+        if faltando:
+            txt += (f" Falta{'m' if faltando > 1 else ''} {faltando}, que "
+                    f"entra{'m' if faltando > 1 else ''} quando a conciliação "
+                    f"fechar.")
+        L.append(txt)
     else:
-        L.append(f"⚠️ **Número parcial** — só {cob:.0f}% dos casos têm saldo "
-                 f"apurado. Faltam {r['sem_saldo']} de {r['casos']}; o "
-                 f"resultado final tende a mudar.")
+        L.append(f"⚠️ **Número parcial** — só {fmt_cobertura(cob, faltando)} "
+                 f"dos casos têm saldo apurado. Faltam {faltando} de "
+                 f"{r['casos']}; o resultado final tende a mudar.")
     L.append("")
 
     if historico:
         L.append("## Meses anteriores")
-        L.append("| Mês | Casos | Prejuízo |")
-        L.append("|---|---|---|")
+        L.append("| Mês | Casos | Prejuízo | Apurado |")
+        L.append("|---|---|---|---|")
+        parcial = False
         for h in historico[:6]:
+            hc = h.get("cobertura_pct")
+            if hc is not None and float(hc) < COBERTURA_MINIMA:
+                parcial = True
             L.append(f"| {h.get('mes')} | {h.get('casos')} | "
-                     f"{brl(h.get('prejuizo'))} |")
+                     f"{brl(h.get('prejuizo'))} | "
+                     f"{f'{float(hc):.0f}%' if hc is not None else '—'} |")
+        if parcial:
+            # Janeiro tinha 57% de cobertura e julho tem 99,7%. Ler a
+            # diferença como piora do negócio é ler artefato de coleta.
+            L.append("")
+            L.append("_Meses com apuração **parcial** têm prejuízo "
+                     "subestimado — a comparação não é direta._")
         ant = historico[0].get("prejuizo")
         if ant and r.get("prejuizo") is not None:
-            v = variacao(abs(float(r["prejuizo"])), abs(float(ant)))
+            v = variacao(prejuizo, abs(float(ant)))
             if v is not None:
                 direcao = "acima" if v > 0 else "abaixo"
                 L.append("")
@@ -219,10 +277,17 @@ def coletar_mes(ano: int, mes: int) -> tuple[dict, list]:
             """, (ini, fim))
             casos = cur.fetchall()
 
+            # A cobertura de cada mês vem junto: janeiro tinha 57% apurado e
+            # julho tem 99,7%. Sem declarar isso, a tabela histórica faz
+            # artefato de coleta parecer tendência do negócio.
             cur.execute("""
                 SELECT TO_CHAR(d.date_updated::timestamptz, 'YYYY-MM') AS mes,
                        COUNT(DISTINCT d.claim_id) AS casos,
-                       COALESCE(SUM(s.total) FILTER (WHERE s.total < 0), 0) AS prejuizo
+                       COALESCE(SUM(s.total) FILTER (WHERE s.total < 0), 0) AS prejuizo,
+                       ROUND(100.0 * COUNT(DISTINCT d.claim_id)
+                             FILTER (WHERE s.total IS NOT NULL)
+                             / NULLIF(COUNT(DISTINCT d.claim_id), 0), 1)
+                         AS cobertura_pct
                 FROM ml_devolucoes d
                 LEFT JOIN meli_page_saldos s ON s.order_id = d.order_id
                 WHERE d.claim_status = 'closed'

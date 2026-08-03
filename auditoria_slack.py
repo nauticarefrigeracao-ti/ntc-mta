@@ -132,13 +132,21 @@ def estado_publicado_no_canvas(markdown: str) -> dict:
 
 
 def resumir_auditoria(canal: str, duplicados: list, faltando: list,
-                      divergentes: list, lidos: int) -> dict:
+                      divergentes: list, lidos: int,
+                      canvas_ilegivel: bool = False) -> dict:
     """Veredito de um canal. `ok` só é True com evidência de leitura."""
     if not lidos:
         return {"ok": False,
                 "texto": f"{canal}: nada foi lido — sem evidência, não há "
                          f"aprovação (canal vazio? bot sem acesso?)"}
     problemas = []
+    if canvas_ilegivel:
+        # 03/08: files.list respondeu missing_scope, a auditoria mostrou
+        # "canvas encontrados: 0" e aprovou o canal. Zero por cegueira não é
+        # zero por ausência — e o Canvas é justamente o que o chefe abre.
+        problemas.append("NÃO consegui ler os Canvas (falta escopo files:read "
+                         "/ canvases:read no app do Slack) — a parte do "
+                         "Canvas fica sem auditoria")
     if duplicados:
         problemas.append(f"{len(duplicados)} duplicado(s): " +
                          ", ".join(f"{i} ({n}x)" for i, n in duplicados[:5]))
@@ -198,7 +206,7 @@ def _canvas_do_canal(cid: str) -> list:
     """
     import slack_client
 
-    achados = []
+    achados, ilegivel = [], False
     info = slack_client._api("conversations.info",
                              {"channel": cid, "include_num_members": "false"},
                              get=True) or {}
@@ -208,13 +216,18 @@ def _canvas_do_canal(cid: str) -> list:
 
     lista = slack_client._api("files.list",
                               {"channel": cid, "types": "canvas", "limit": "50"},
-                              get=True) or {}
-    for f in (lista.get("files") or []):
+                              get=True)
+    if lista is None:
+        ilegivel = True
+    for f in ((lista or {}).get("files") or []):
         if f.get("id") and f["id"] not in ids:
             ids.append(f["id"])
 
     for fid in ids:
-        det = slack_client._api("files.info", {"file": fid}, get=True) or {}
+        det = slack_client._api("files.info", {"file": fid}, get=True)
+        if det is None:
+            ilegivel = True
+            continue
         arq = det.get("file") or {}
         md = ""
         for chave in ("canvas_markdown", "plain_text", "preview"):
@@ -223,7 +236,7 @@ def _canvas_do_canal(cid: str) -> list:
                 break
         achados.append({"id": fid, "titulo": arq.get("title") or "(sem título)",
                         "markdown": md})
-    return achados
+    return achados, ilegivel
 
 
 def _coluna_no_banco(ids: set) -> dict:
@@ -296,7 +309,7 @@ def auditar_canal(canal: str, dias: int = 7) -> dict:
                          f"aprovação"}
     ids_msgs = [i for t in textos for i in ids_no_texto(t)]
 
-    canvas = _canvas_do_canal(cid)
+    canvas, canvas_ilegivel = _canvas_do_canal(cid)
     ids_canvas = []
     for c in canvas:
         ids_canvas += list(ids_no_texto(c["markdown"]))
@@ -318,7 +331,8 @@ def auditar_canal(canal: str, dias: int = 7) -> dict:
     falt = lacunas(devidos, publicados) if cobra_lacuna(canal) else []
 
     r = resumir_auditoria(canal, dup_canvas, falt, div,
-                          lidos=len(textos) + len(canvas))
+                          lidos=len(textos) + len(canvas),
+                          canvas_ilegivel=canvas_ilegivel)
     r.update({"mensagens": len(textos), "canvas": canvas,
               "ids_mensagens": len(set(ids_msgs)),
               "ids_canvas": len(set(ids_canvas)),
