@@ -12,6 +12,7 @@ vago. A cobertura de conciliacao e uma CATRACA: pode subir, nunca cair.
 import pytest
 
 from confianca import (
+    checar_coleta_saldos,
     IRRECUPERAVEIS,
     Achado,
     checar_cobertura_nao_caiu,
@@ -156,6 +157,36 @@ def test_irrecuperavel_nao_esconde_shipment_novo():
     assert a is not None and "1 caso" in a.evidencia
 
 
+# --- frescor da coleta de saldos -------------------------------------------
+# A coleta de saldos e RPA com sessao de navegador: nao roda no CI, roda na
+# maquina do Lucas. Em 01/08 descobrimos que ela estava parada desde 24/07 --
+# 9 dias -- e por isso 25% de julho ficou sem saldo. Disciplina nao basta:
+# o sistema precisa avisar.
+
+def test_coleta_recente_nao_gera_achado():
+    assert checar_coleta_saldos(dias_desde_ultima=2) is None
+
+
+def test_coleta_no_limite_ainda_passa():
+    assert checar_coleta_saldos(dias_desde_ultima=7) is None
+
+
+def test_coleta_atrasada_gera_achado():
+    a = checar_coleta_saldos(dias_desde_ultima=9)
+    assert a is not None and a.severidade == "quebra"
+    assert "9" in a.evidencia
+
+
+def test_achado_de_coleta_diz_o_comando():
+    a = checar_coleta_saldos(dias_desde_ultima=30)
+    assert "coletar_saldos_meli" in a.acao
+
+
+def test_nunca_coletou_gera_achado():
+    a = checar_coleta_saldos(dias_desde_ultima=None)
+    assert a is not None
+
+
 def test_todo_irrecuperavel_tem_motivo_escrito():
     for oid, motivo in IRRECUPERAVEIS.items():
         assert len(motivo) > 25, f"{oid} sem evidência do porquê"
@@ -219,4 +250,5 @@ def test_achado_sempre_carrega_acao():
     for a in [checar_order_ids_reais([1]), checar_duplicatas([1, 1]),
               checar_cobertura_nao_caiu(atual=1.0, anterior=50.0)]:
         assert a.acao and len(a.acao) > 10
+
 

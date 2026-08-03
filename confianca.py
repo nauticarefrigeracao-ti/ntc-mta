@@ -77,6 +77,43 @@ def cobertura_conciliacao(total: int, conciliados: int) -> float:
     return min(100.0, 100.0 * conciliados / total)
 
 
+# A coleta de saldos e RPA com sessao de navegador logada: nao roda no CI.
+# Depois disto, o numero do mes comeca a nascer parcial sem ninguem perceber.
+DIAS_COLETA_ACEITAVEL = 7
+
+
+def checar_coleta_saldos(dias_desde_ultima: Optional[int]) -> Optional[Achado]:
+    """A coleta de saldos esta em dia?
+
+    Em 01/08/2026 descobrimos que estava parada desde 24/07 -- nove dias -- e
+    por isso 25% dos casos fechados em julho ficaram sem saldo. O balanco
+    mensal sairia parcial e ninguem saberia por que.
+
+    Como a coleta depende da maquina do operador (sessao logada no Meli),
+    disciplina nao basta: o sistema tem que cobrar."""
+    if dias_desde_ultima is None:
+        return Achado(
+            invariante="coleta_saldos",
+            severidade="quebra",
+            resumo="Nunca houve coleta de saldos",
+            evidencia="meli_page_saldos sem registro de coleta",
+            acao=("Rode `python scripts/coletar_saldos_meli.py --de AAAA-MM-DD "
+                  "--ate AAAA-MM-DD` na máquina com a sessão do Meli."),
+        )
+    if dias_desde_ultima <= DIAS_COLETA_ACEITAVEL:
+        return None
+    return Achado(
+        invariante="coleta_saldos",
+        severidade="quebra",
+        resumo="A coleta de saldos está atrasada",
+        evidencia=f"última coleta há {dias_desde_ultima} dias "
+                  f"(aceitável: até {DIAS_COLETA_ACEITAVEL})",
+        acao=("Cada dia sem coletar é um caso fechado que entra no mês sem "
+              "saldo. Rode `python scripts/coletar_saldos_meli.py` na máquina "
+              "com a sessão do Meli."),
+    )
+
+
 def checar_conciliados_nao_caiu(atual: int, anterior: Optional[int]) -> Optional[Achado]:
     """A catraca de verdade: o NUMERO de casos conciliados nunca cai.
 
@@ -289,7 +326,20 @@ def rodar_bateria() -> tuple[float, list[Achado]]:
             # A catraca e o ABSOLUTO. O percentual segue publicado como
             # termometro de progresso, mas nao derruba o CI sozinho -- ele cai
             # legitimamente quando o universo cresce.
+            # Frescor da coleta de saldos: sem isso, cada dia parado vira um
+            # caso fechado que entra no mes sem valor apurado.
+            cur.execute("SELECT MAX(coletado_em) FROM meli_page_saldos")
+            linha_coleta = cur.fetchone()
+            dias_coleta = None
+            if linha_coleta and linha_coleta[0]:
+                from datetime import datetime as _dt, timezone as _tz
+                ult = linha_coleta[0]
+                if ult.tzinfo is None:
+                    ult = ult.replace(tzinfo=_tz.utc)
+                dias_coleta = (_dt.now(_tz.utc) - ult).days
+
             for a in (checar_conciliados_nao_caiu(conciliados or 0, anterior_abs),
+                      checar_coleta_saldos(dias_coleta),
                       checar_order_ids_reais(ids),
                       checar_duplicatas(claims_fechamento)):
                 if a:
