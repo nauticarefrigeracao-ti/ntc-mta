@@ -522,6 +522,96 @@ def situacao_prazo(row: Mapping[str, Any],
     return "ok"
 
 
+# --- idade do caso: a régua que o ML não dá, tirada da nossa história -------
+#
+# MEDIÇÃO NA API DO ML (03/08/2026, 4 claims abertas): o Mercado Livre NÃO
+# expõe prazo para disputa. Sem `due_date`, sem `expiration`;
+# /expected_resolution, /actions e /resolution devolvem 400. Só o estágio
+# `claim` traz `available_actions`, e as medidas vinham `mandatory: False`.
+# A coluna `ml_mandatory_due` está preenchida em 6 de 18.166 linhas, ZERO
+# delas aberta.
+#
+# Resultado: 27 dos 33 casos abertos (82%) ficavam no Quadro sem relógio
+# nenhum — e não há relógio do ML para colocar ali. Inventar um seria o mesmo
+# defeito de inventar qualquer número.
+#
+# O que é honesto: a NOSSA história. Medida sobre os casos fechados em 2026:
+#
+#     estágio      n     mediana   p90       maior já fechado
+#     dispute     759    11,8 d    42,0 d       344,6 d
+#     claim       109     6,9 d    27,5 d       105,7 d
+#     recontact    42    10,7 d    19,1 d        29,8 d
+#
+# Com isso dá para afirmar duas coisas verdadeiras: há quanto tempo o caso
+# está aberto, e se já passou do tempo que 90% dos casos iguais levaram.
+DIAS_P90 = {"dispute": 42.0, "claim": 27.5, "recontact": 19.1}
+
+# Acima disto o caso está além de TUDO que a operação já conseguiu fechar
+# naquele estágio. Não é atraso, é abandono — e a ação é outra: revisar ou
+# encerrar, não "responder mais rápido". Três casos reais em `claim` estão
+# aqui: 595, 563 e 364 dias, contra um teto histórico de 105,7.
+MAIOR_JA_FECHADO = {"dispute": 344.6, "claim": 105.7, "recontact": 29.8}
+
+
+def idade_em_dias(row: Mapping[str, Any],
+                  agora: Optional[datetime] = None) -> Optional[float]:
+    """Há quantos dias o caso está aberto. None quando não dá para saber —
+    melhor não dizer nada do que dizer um número que não medimos."""
+    bruto = row.get("date_created")
+    if not bruto:
+        return None
+    try:
+        criado = datetime.fromisoformat(str(bruto).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if criado.tzinfo is None:
+        criado = criado.replace(tzinfo=timezone.utc)
+    agora = agora or datetime.now(timezone.utc)
+    return (agora - criado).total_seconds() / 86400.0
+
+
+def passou_do_tipico(row: Mapping[str, Any],
+                     agora: Optional[datetime] = None) -> bool:
+    """Já demorou mais que 90% dos casos do mesmo estágio."""
+    limite = DIAS_P90.get(str(row.get("claim_stage") or "").lower())
+    if limite is None:
+        return False
+    dias = idade_em_dias(row, agora)
+    return dias is not None and dias > limite
+
+
+def parece_abandonado(row: Mapping[str, Any],
+                      agora: Optional[datetime] = None) -> bool:
+    """Além do maior caso que já conseguimos fechar naquele estágio."""
+    teto = MAIOR_JA_FECHADO.get(str(row.get("claim_stage") or "").lower())
+    if teto is None:
+        return False
+    dias = idade_em_dias(row, agora)
+    return dias is not None and dias > teto
+
+
+def texto_idade(row: Mapping[str, Any],
+                agora: Optional[datetime] = None) -> str:
+    """"aberto há 3 dias" — na unidade que a pessoa entende.
+
+    Mesma lição do `_atraso_legivel`: "aberto há 595 dias" faz o leitor parar
+    para converter, e número que exige conta vira número ignorado.
+    """
+    dias = idade_em_dias(row, agora)
+    if dias is None:
+        return ""
+    if dias < 1:
+        return f"aberto há {max(1, int(dias * 24))}h"
+    if dias < 45:
+        n = int(round(dias))
+        return f"aberto há {n} dia{'s' if n != 1 else ''}"
+    if dias < 365:
+        n = int(round(dias / 30))
+        return f"aberto há {n} {'meses' if n != 1 else 'mês'}"
+    n = round(dias / 365, 1)
+    return f"aberto há {n:.1f} ano{'s' if n != 1 else ''}".replace(".", ",")
+
+
 def _atraso_legivel(horas: float) -> str:
     """Atraso na unidade que a pessoa entende.
 
@@ -600,9 +690,19 @@ def montar_canvas_quadro(rows, data_str: str,
     ela ve exige acao dela (3 de 40) -- listar os 37 restantes recriaria
     exatamente o afogamento que este quadro veio resolver.
     """
-    a_fazer, aguardando, feito = [], [], []
+    # PARADOS SAEM DAS OUTRAS COLUNAS.
+    # Em 03/08 os 3 casos de 2024/2025 apareciam em "A Fazer" E em "Parados"
+    # -- o mesmo pedido duas vezes no mesmo Canvas, que e o defeito que a
+    # auditoria proibe. E o topo dizia "6 com prazo VENCIDO" quando so 3 eram
+    # de verdade: os zumbis empurravam os casos de agosto para baixo.
+    # "A Fazer" e o que se resolve respondendo; caso de 1,6 ano nao se
+    # resolve respondendo.
+    a_fazer, aguardando, feito, parados = [], [], [], []
     for r in rows:
         col = classificar_kanban(r)
+        if col != "feito" and parece_abandonado(r):
+            parados.append(r)
+            continue
         (a_fazer if col == "a_fazer" else
          aguardando if col == "aguardando" else feito).append(r)
 
@@ -656,7 +756,35 @@ def montar_canvas_quadro(rows, data_str: str,
         # saber que a mercadoria ja esta aqui.
         L.append(f"_Destes, **{n_chegou_aguardando}** já tiveram o produto "
                  f"devolvido entregue._")
+    # O ML nao da prazo em disputa (medido na API em 03/08). O que da para
+    # dizer com verdade e se o caso ja passou do tempo que 90% dos casos
+    # iguais levaram -- regua tirada de 759 disputas nossas ja fechadas.
+    n_lentos = sum(1 for r in aguardando
+                   if passou_do_tipico(r) and not parece_abandonado(r))
+    if n_lentos:
+        L.append(f"_**{n_lentos}** já passaram do tempo que 90% dos casos "
+                 f"como estes levaram._")
     L.append("")
+
+    # ── PARADOS: nao sao atrasados, sao abandonados ───────────────────────
+    # Alem do maior caso que a operacao ja conseguiu fechar naquele estagio.
+    # A acao aqui nao e "responder mais rapido" -- e revisar ou encerrar. Sao
+    # poucos e ficam no quadro para sempre; mostrar uma vez, com o nome, e o
+    # que tira eles de la.
+    if parados:
+        parados.sort(key=lambda r: -(idade_em_dias(r) or 0))
+        L.append(f"## ⚫ Parados — {len(parados)}")
+        L.append("_Passaram do caso mais antigo que já conseguimos encerrar. "
+                 "Não é responder mais rápido: é revisar ou encerrar._")
+        for r in parados:
+            titulo = (r.get("item_title") or "Produto").strip() or "Produto"
+            if len(titulo) > 50:
+                titulo = titulo[:49].rstrip() + "…"
+            oid = r.get("order_id")
+            L.append(f"- **{titulo}** · {texto_idade(r)}")
+            if oid:
+                L.append(f"  [Abrir a venda {oid}]({_link_venda(oid)})")
+        L.append("")
 
     # ── FEITO ─────────────────────────────────────────────────────────────
     L.append(f"## 🟢 Feito — {len(feito)}")
