@@ -23,6 +23,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -145,8 +146,67 @@ def fmt_cobertura(pct: float, faltando: int) -> str:
     return f"{min(pct, 99.9):.1f}".replace(".", ",") + "%"
 
 
+def secao_onde_vaza(motivos: list, skus: list) -> str:
+    """"Qual produto está me custando dinheiro?" — hoje isso exige SQL.
+
+    Medição de maio a julho/2026: **um** motivo ("Produto não funciona", 96
+    casos, R$ 9.937,78) responde por 77% de todo o prejuízo apurado. E não é
+    motivo de SAC — é de produto, fornecedor ou anúncio. O SAC paga a conta de
+    uma decisão tomada antes dele. A família NR1058 sozinha: 18 casos,
+    R$ 2.602,50.
+
+    Vai em markdown, no Canvas que o chefe já abre. Sem componente visual
+    novo: a regra do Design System vale aqui também.
+    """
+    if not motivos and not skus:
+        return ""  # cabeçalho sem linha embaixo faz o leitor achar que quebrou
+
+    L = ["## 💸 Onde o dinheiro vaza", ""]
+
+    if motivos:
+        total = sum(abs(float(m.get("prejuizo") or 0)) for m in motivos)
+        L.append("| Motivo | Casos | Prejuízo |")
+        L.append("|---|---|---|")
+        for m in motivos[:6]:
+            L.append(f"| {motivo_legivel(m.get('chave'))} | {m.get('casos')} | "
+                     f"{_fmt_brl(abs(float(m.get('prejuizo') or 0)))} |")
+        # "96 casos" não move ninguém; "77% de todo o prejuízo" move.
+        topo = abs(float(motivos[0].get("prejuizo") or 0))
+        if total and topo / total >= 0.5:
+            L.append("")
+            L.append(f"_**{motivo_legivel(motivos[0].get('chave'))}** sozinho "
+                     f"responde por {100 * topo / total:.0f}% do prejuízo — e "
+                     f"não é um problema de atendimento._")
+        L.append("")
+
+    if skus:
+        L.append("| SKU | Casos | Prejuízo |")
+        L.append("|---|---|---|")
+        for s in skus[:6]:
+            L.append(f"| {s.get('chave')} | {s.get('casos')} | "
+                     f"{_fmt_brl(abs(float(s.get('prejuizo') or 0)))} |")
+        L.append("")
+
+    return "\n".join(L)
+
+
+def motivo_legivel(chave: Any) -> str:
+    """Código cru do ML não vai para a diretoria.
+
+    229 códigos como `PDD9952` vivem na base. Publicar isso já foi defeito
+    aqui — o leitor não tem como saber o que significa, e um relatório que
+    exige decodificação não é lido.
+    """
+    texto = str(chave or "").strip() or "(sem motivo)"
+    if re.fullmatch(r"[A-Z]{2,4}\d{3,}", texto):
+        return f"código {texto} (sem tradução do ML)"
+    return texto
+
+
 def montar_canvas_mensal(mes_label: str, r: Mapping[str, Any],
-                         historico: list) -> str:
+                         historico: list,
+                         motivos: Optional[list] = None,
+                         skus: Optional[list] = None) -> str:
     """Markdown do Canvas mensal.
 
     O TITULAR É O PREJUÍZO, não um "saldo".
@@ -223,6 +283,10 @@ def montar_canvas_mensal(mes_label: str, r: Mapping[str, Any],
                  f"{r['casos']}; o resultado final tende a mudar.")
     L.append("")
 
+    vaza = secao_onde_vaza(motivos or [], skus or [])
+    if vaza:
+        L.append(vaza)
+
     if historico:
         L.append("## Meses anteriores")
         L.append("| Mês | Casos | Prejuízo | Apurado |")
@@ -258,7 +322,7 @@ def montar_canvas_mensal(mes_label: str, r: Mapping[str, Any],
 
 # --- coleta e publicação ---------------------------------------------------
 
-def coletar_mes(ano: int, mes: int) -> tuple[dict, list]:
+def coletar_mes(ano: int, mes: int) -> tuple[dict, list, list, list]:
     from src.db.connection import get_db_connection, dict_cursor
 
     ini, fim = periodo_do_mes(ano, mes)
@@ -297,17 +361,40 @@ def coletar_mes(ano: int, mes: int) -> tuple[dict, list]:
                 GROUP BY 1 ORDER BY 1 DESC
             """, (ini, ini))
             historico = cur.fetchall()
+
+            # Onde o dinheiro vaza. A janela e de 3 MESES, nao do mes: um
+            # motivo com 4 casos no mes nao diz nada, mas 96 casos no
+            # trimestre dizem para quem decide compra.
+            vaza = {}
+            for campo, chave in (("reason_label", "motivos"),
+                                 ("item_sku", "skus")):
+                cur.execute(f"""
+                    SELECT COALESCE(NULLIF(TRIM(d.{campo}), ''), '(sem dado)')
+                             AS chave,
+                           COUNT(*) AS casos,
+                           ROUND(SUM(s.total)::numeric, 2) AS prejuizo
+                    FROM ml_devolucoes d
+                    JOIN meli_page_saldos s ON s.order_id = d.order_id
+                    WHERE d.claim_status = 'closed' AND s.total < 0
+                      AND d.date_updated ~ '^[0-9]{{4}}-'
+                      AND d.date_updated::timestamptz <  %s
+                      AND d.date_updated::timestamptz >= %s - interval '3 months'
+                    GROUP BY 1 ORDER BY prejuizo ASC LIMIT 6
+                """, (fim, fim))
+                vaza[chave] = [dict(x) for x in cur.fetchall()]
     finally:
         conn.close()
 
-    return resumir_mes(casos), [dict(h) for h in historico]
+    return (resumir_mes(casos), [dict(h) for h in historico],
+            vaza["motivos"], vaza["skus"])
 
 
 def publicar(ano: int, mes: int, canal: str = CANAL_FECHAMENTO) -> bool:
     from src.db.connection import get_db_connection
 
-    resumo, historico = coletar_mes(ano, mes)
-    markdown = montar_canvas_mensal(nome_do_mes(ano, mes), resumo, historico)
+    resumo, historico, motivos, skus = coletar_mes(ano, mes)
+    markdown = montar_canvas_mensal(nome_do_mes(ano, mes), resumo, historico,
+                                    motivos=motivos, skus=skus)
 
     cid = slack_client.garantir_canal(canal)
     if not cid:
@@ -377,8 +464,9 @@ def main() -> int:
 
     if args.dry_run:
         for ano, mes in alvos:
-            resumo, historico = coletar_mes(ano, mes)
-            print(montar_canvas_mensal(nome_do_mes(ano, mes), resumo, historico))
+            resumo, historico, motivos, skus = coletar_mes(ano, mes)
+            print(montar_canvas_mensal(nome_do_mes(ano, mes), resumo,
+                                       historico, motivos=motivos, skus=skus))
             print()
         return 0
 
@@ -394,3 +482,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
