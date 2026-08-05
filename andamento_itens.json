@@ -1,0 +1,56 @@
+[
+  {
+    "titulo": "Fechamento de julho conferido venda por venda",
+    "estado": "pronto",
+    "ganho": "As 290 devoluções de julho foram conferidas uma a uma contra o Mercado Livre. O resultado do mês está no canal de fechamento, com a lista completa do dia 1 ao dia 31 e o link de cada venda",
+    "minutos": 180
+  },
+  {
+    "titulo": "Prejuízo de julho estava maior do que a realidade",
+    "estado": "pronto",
+    "ganho": "Uma venda com dois atendimentos era contada duas vezes. O prejuízo do mês caiu de R$ 6.074,99 para o valor correto, R$ 5.930,84",
+    "minutos": 40
+  },
+  {
+    "titulo": "Links que não abriam nas mensagens do SAC",
+    "estado": "pronto",
+    "ganho": "49 avisos traziam um número de entrega no lugar do número da venda, e o link dava erro ao clicar. Todos receberam o link certo logo abaixo",
+    "minutos": 55
+  },
+  {
+    "titulo": "Valor da venda ignorava a quantidade",
+    "estado": "pronto",
+    "ganho": "Pedidos com mais de uma unidade apareciam pelo preço de uma só. Um deles mostrava R$ 659,00 quando a venda foi de R$ 1.318,00. Agora bate com o Mercado Livre",
+    "minutos": 35
+  },
+  {
+    "titulo": "Aviso do dia dizia 'saldo' somando ganho com perda",
+    "estado": "pronto",
+    "ganho": "O aviso diário mostrava um número positivo em dias sem nenhum prejuízo, o que se lê como lucro. Agora a manchete é a perda, e a receita recuperada aparece separada",
+    "minutos": 30
+  },
+  {
+    "titulo": "Fechamento de agosto aparecia no dia 5",
+    "estado": "pronto",
+    "ganho": "O canal mostrava dois fechamentos mensais ao mesmo tempo, e não dava para saber qual valia. Agora só entra mês que já terminou",
+    "minutos": 25
+  },
+  {
+    "titulo": "Medidor de esforço por entrega",
+    "estado": "pronto",
+    "ganho": "Toda entrega passa a sair com quanto tempo levou e quanto consumiu, para dar para comparar custo e resultado sem achismo",
+    "minutos": 45
+  },
+  {
+    "titulo": "Duas abas iguais no canal do SAC",
+    "estado": "fazendo",
+    "ganho": "Existem dois quadros com o mesmo nome e um deles está parado desde 26 de julho. Quem clicar no errado lê informação velha. A remoção é manual e está agendada",
+    "minutos": null
+  },
+  {
+    "titulo": "Tempo entre o Mercado Livre e o quadro do SAC",
+    "estado": "fazendo",
+    "ganho": "Hoje um caso pode levar horas até aparecer no quadro. O objetivo é derrubar essa espera para minutos, para o quadro refletir o Mercado Livre em tempo real",
+    "minutos": null
+  }
+]
