@@ -86,6 +86,90 @@ DIAS_COLETA_ACEITAVEL = 7
 DIAS_ORDERS_ACEITAVEL = 2
 
 
+# O que o sistema REALMENTE usa no Slack. Nao e a lista do app -- e a lista do
+# codigo. `files:read` fica de fora de proposito: medimos em 05/08 que
+# `canvases.sections.lookup` le o Canvas sem ele, e cobrar permissao
+# dispensavel deixaria a bateria vermelha para sempre.
+ESCOPOS_NECESSARIOS = (
+    "chat:write",         # publicar no #sac e no #sac-fechamento
+    "channels:history",   # ler o canal (auditoria, nao republicar fechamento)
+    "channels:read",      # resolver o id do canal pelo nome
+    "channels:join",      # garantir_canal entra no canal
+    "canvases:write",     # Quadro da Maria e balanco do chefe
+    "canvases:read",      # conferir o conteudo publicado
+)
+
+
+def _escopos_do_token() -> Optional[list]:
+    """Os escopos que o token carrega, lidos do header `x-oauth-scopes`.
+
+    None quando o token não respondeu — que é diferente de `[]` (respondeu
+    sem escopo). Confundir os dois manda procurar o problema no lugar errado.
+    NUNCA imprime o token.
+    """
+    import urllib.request
+
+    try:
+        import slack_client
+        tok = slack_client._token()
+        if not tok:
+            return None
+        req = urllib.request.Request(
+            "https://slack.com/api/auth.test",
+            headers={"Authorization": f"Bearer {tok}"}, method="POST")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            import json as _json
+            if not (_json.loads(resp.read()) or {}).get("ok"):
+                return None
+            bruto = resp.headers.get("x-oauth-scopes") or ""
+        return [s.strip() for s in bruto.split(",") if s.strip()]
+    except Exception:
+        # Rede caída não é token morto, mas daqui não dá para distinguir —
+        # e um falso alarme custa menos que um notificador mudo por dias.
+        return None
+
+
+def checar_token_slack(escopos: Optional[list]) -> Optional[Achado]:
+    """O token do Slack esta vivo E suficiente?
+
+    Em 05/08/2026 o app quase foi reinstalado com dezenas de escopos extras
+    (varios `admin.*`, que exigem Enterprise Grid). O Slack recusou o pacote
+    inteiro e nada mudou. Mas o susto expos o buraco: **reinstalar o app
+    rotaciona o bot token**. Se o SLACK_BOT_TOKEN do GitHub nao for atualizado
+    no mesmo minuto, o notificador para -- e ninguem olha o painel do Actions
+    de hora em hora.
+
+    Pior e a reinstalacao que RETIRA um escopo: o token continua valido,
+    `chat:write` segue funcionando, e o Quadro para de atualizar sem erro
+    nenhum. Token vivo nao e token suficiente -- por isso as duas checagens.
+    """
+    if escopos is None:
+        return Achado(
+            invariante="token_slack",
+            severidade="quebra",
+            resumo="O token do Slack não respondeu",
+            evidencia="auth.test não retornou — token revogado, expirado ou "
+                      "rotacionado por uma reinstalação do app",
+            acao=("Gere um Bot Token novo em api.slack.com > OAuth & "
+                  "Permissions e atualize o segredo SLACK_BOT_TOKEN nos dois "
+                  "repos do GitHub. Nunca cole o token em chat ou log."),
+        )
+    faltam = [e for e in ESCOPOS_NECESSARIOS if e not in set(escopos)]
+    if not faltam:
+        return None
+    return Achado(
+        invariante="token_slack",
+        severidade="quebra",
+        resumo="O token do Slack respondeu, mas perdeu escopo que o sistema usa",
+        evidencia=f"faltam: {', '.join(faltam)} — o token segue válido, então "
+                  f"nada dá erro: a parte que depende desses escopos "
+                  f"simplesmente para de funcionar em silêncio",
+        acao=("Reponha os escopos em api.slack.com > OAuth & Permissions e "
+              "reinstale. A reinstalação rotaciona o token: atualize o "
+              "SLACK_BOT_TOKEN nos dois repos logo em seguida."),
+    )
+
+
 def checar_orders_frescos(dias_desde_ultima_venda: Optional[int]
                           ) -> Optional[Achado]:
     """A tabela-raiz da fila esta viva?
@@ -400,7 +484,13 @@ def rodar_bateria() -> tuple[float, list[Achado]]:
                     ult_venda = ult_venda.replace(tzinfo=_tz2.utc)
                 dias_orders = (_dt2.now(_tz2.utc) - ult_venda).days
 
+            # Token do Slack: vivo E suficiente. Uma reinstalacao do app
+            # rotaciona o token; uma que retire escopo deixa o token valido e
+            # a funcionalidade morta, sem erro nenhum.
+            escopos_slack = _escopos_do_token()
+
             for a in (checar_conciliados_nao_caiu(conciliados or 0, anterior_abs),
+                      checar_token_slack(escopos_slack),
                       checar_orders_frescos(dias_orders),
                       checar_coleta_saldos(dias_coleta),
                       checar_order_ids_reais(ids),
