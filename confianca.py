@@ -245,7 +245,10 @@ def _achados_de_abas(cur) -> list:
 
     oficiais_por_canal: dict = {}
     try:
-        cur.execute("SELECT canal_id, canvas_id FROM slack_canvas")
+        # A coluna e `channel_id`, nao `canal_id`. Escrevi a consulta sem
+        # rodar a bateria e o CI ficou vermelho no primeiro push --
+        # a bateria fez o trabalho dela, que e falhar alto.
+        cur.execute("SELECT channel_id, canvas_id FROM slack_canvas")
         for canal_id, canvas_id in cur.fetchall():
             oficiais_por_canal.setdefault(canal_id, set()).add(canvas_id)
     except Exception as exc:  # tabela ausente e defeito, nao silencio
