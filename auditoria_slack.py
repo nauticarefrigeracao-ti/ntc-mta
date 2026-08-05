@@ -58,6 +58,27 @@ def cobra_lacuna(canal: str) -> bool:
     return (canal or "").strip().lower() in CANAIS_POR_CASO
 
 
+# A leitura do canal precisa cobrir MAIS dias do que a cobrança.
+#
+# 05/08/2026: a auditoria apontou 15 lacunas no #sac. Todas falsas — os 8
+# conferidos foram avisados entre 4 e 67 minutos depois de fechar. As duas
+# janelas eram iguais (7 dias), então uma mensagem publicada às 12:20 de 29/07
+# caía FORA da leitura (que começava ~13h de 29/07) enquanto o caso continuava
+# na lista de devidos por um aviso posterior do mesmo pedido. Bordas que não
+# casam viram acusação.
+#
+# Terceira vez que a auditoria acusa comportamento correto. Auditoria que
+# inventa achado queima a confiança de quem confere — e aí o achado verdadeiro
+# também é ignorado.
+DIAS_MARGEM_LEITURA = 2
+
+
+def janelas(dias: int) -> tuple:
+    """(dias cobrados, dias lidos). A leitura sempre alcança mais atrás."""
+    cobranca = max(1, int(dias))
+    return cobranca, cobranca + DIAS_MARGEM_LEITURA
+
+
 def _regra_de_publicacao():
     """A MESMA regra que o notificador usa (D3). Auditoria com regra própria
     audita a própria opinião, não o sistema."""
@@ -301,7 +322,8 @@ def auditar_canal(canal: str, dias: int = 7) -> dict:
     # ultimas_mensagens devolve TEXTOS (não dicts) e devolve None quando não
     # conseguiu ler. None não pode virar "canal vazio": ler zero e aprovar é
     # exatamente como um validador já deu OK numa tela de login.
-    textos = historico_do_canal(cid, dias=dias)
+    dias_cobranca, dias_leitura = janelas(dias)
+    textos = historico_do_canal(cid, dias=dias_leitura)
     if textos is None:
         return {"ok": False,
                 "texto": f"{canal}: não consegui LER o histórico "
@@ -315,7 +337,7 @@ def auditar_canal(canal: str, dias: int = 7) -> dict:
         ids_canvas += list(ids_no_texto(c["markdown"]))
 
     publicados = set(ids_msgs) | set(ids_canvas)
-    devidos = _devidos_no_periodo(dias)
+    devidos = _devidos_no_periodo(dias_cobranca)
 
     # O estado que o Canvas MOSTRA, contra o estado que o banco tem hoje.
     publicado_por_canvas = {}

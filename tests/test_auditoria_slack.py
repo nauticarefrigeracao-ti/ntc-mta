@@ -206,6 +206,46 @@ def test_devido_usa_a_MESMA_regra_do_notificador():
     assert auditoria_slack.devido_no_canal is slack_notify.deve_notificar_no_canal
 
 
+# --- as duas janelas precisam de margem ------------------------------------
+# TERCEIRA vez que a auditoria acusa comportamento correto. Em 05/08 ela
+# apontou 15 lacunas no #sac. Todas falsas: os 8 conferidos foram avisados
+# entre 4 e 67 minutos depois de fechar.
+#
+# A causa: `devidos` olhava avisos dos ultimos 7 dias e a leitura do canal
+# tambem lia 7 dias. Uma mensagem publicada as 12:20 de 29/07 cai FORA da
+# leitura (que comeca ~13h de 29/07), mas o caso continua na lista de devidos
+# por causa de um aviso posterior do mesmo pedido. Bordas que nao casam viram
+# acusacao.
+#
+# A janela de leitura tem que ser MAIOR que a de cobranca. Auditoria que
+# inventa achado queima a confianca de quem confere -- e ai o achado
+# verdadeiro tambem e ignorado.
+
+def test_a_leitura_cobre_mais_dias_que_a_cobranca():
+    from auditoria_slack import DIAS_MARGEM_LEITURA
+    assert DIAS_MARGEM_LEITURA >= 1
+
+
+def test_janela_de_cobranca_e_menor_que_a_de_leitura():
+    from auditoria_slack import janelas
+    cobranca, leitura = janelas(dias=7)
+    assert cobranca < leitura, "bordas iguais reabrem o falso positivo"
+
+
+def test_a_margem_nao_engole_a_janela_toda():
+    """Cobrar 1 dia e ler 30 esconderia lacuna de verdade."""
+    from auditoria_slack import janelas
+    cobranca, leitura = janelas(dias=7)
+    assert cobranca >= 5
+
+
+def test_janela_minima_nao_vira_zero():
+    """Com --dias 1 a cobranca nao pode virar 0 e aprovar tudo por vacuo."""
+    from auditoria_slack import janelas
+    cobranca, leitura = janelas(dias=1)
+    assert cobranca >= 1 and leitura > cobranca
+
+
 # --- a quem cobrar lacuna --------------------------------------------------
 # Primeira execução real (03/08/2026) acusou 72 lacunas no #sac-fechamento.
 # Nenhuma era verdadeira: aquele canal é o PLACAR do chefe — números
