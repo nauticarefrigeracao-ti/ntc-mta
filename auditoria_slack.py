@@ -165,9 +165,15 @@ def resumir_auditoria(canal: str, duplicados: list, faltando: list,
         # 03/08: files.list respondeu missing_scope, a auditoria mostrou
         # "canvas encontrados: 0" e aprovou o canal. Zero por cegueira não é
         # zero por ausência — e o Canvas é justamente o que o chefe abre.
-        problemas.append("NÃO consegui ler os Canvas (falta escopo files:read "
-                         "/ canvases:read no app do Slack) — a parte do "
-                         "Canvas fica sem auditoria")
+        #
+        # 05/08: descobrimos que `canvases:read` JÁ existia e que
+        # `canvases.sections.lookup` confere o conteúdo sem `files:read`.
+        # Então isto aqui deixou de significar "sem permissão" e passou a
+        # significar o que realmente importa: o canal deveria ter Canvas e
+        # não temos registro de nenhum publicado.
+        problemas.append("o canal deveria ter Canvas e não há nenhum "
+                         "registrado como publicado — rode `--canvas`/"
+                         "`--quadro` ou o balanço mensal")
     if duplicados:
         problemas.append(f"{len(duplicados)} duplicado(s): " +
                          ", ".join(f"{i} ({n}x)" for i, n in duplicados[:5]))
@@ -184,6 +190,83 @@ def resumir_auditoria(canal: str, duplicados: list, faltando: list,
                          f"sem duplicidade nem lacuna"}
     return {"ok": False,
             "texto": f"{canal}: {lidos} item(ns) lido(s) — " + " | ".join(problemas)}
+
+
+# --- ler o Canvas com o escopo que JA temos --------------------------------
+#
+# Desde 03/08 a auditoria dizia "falta files:read / canvases:read". Metade
+# estava errado: o token JA tem `canvases:read` (medido em 05/08 no header
+# x-oauth-scopes). Falta so `files:read`, exigido por files.info/files.list --
+# nao pela API de Canvas.
+#
+# Medido em 05/08 contra os Canvas reais, 6 de 6 acertos:
+#     'Prejuízo do mês'      -> 1 secao   (esta la, e deveria)
+#     'Saldo do mês'         -> 0 secoes  (removido em 03/08, e nao esta)
+#     'zzz nao existe zzz'   -> 0 secoes
+#
+# Da para provar o que o Canvas contem E o que ele nao contem, sem reinstalar
+# o app, sem rotacionar token, sem tocar em escopo.
+#
+# O que segue fora de alcance: LISTAR os canvas do canal (isso e files.list).
+# Entao conferimos os que NOS publicamos -- os ids estao no banco -- e nao
+# descobrimos um canvas orfao criado por outra pessoa. Declarado, nao
+# escondido.
+
+MARCOS_ESPERADOS = {
+    "#sac": ["A Fazer", "Aguardando"],
+    "#sac-fechamento": ["Prejuízo do mês", "Onde o dinheiro vaza",
+                        "Confiança do número"],
+}
+
+
+def verificar_marcos(canvas_id: str, marcos: list, api=None) -> dict:
+    """{marco: True|False|None} — None quando não deu para olhar.
+
+    False diz "o texto não está lá". None diz "não consegui olhar". Confundir
+    os dois é o mesmo defeito de aprovar uma tela de login.
+    """
+    import json
+
+    if not marcos:
+        return {}
+    if api is None:
+        import slack_client
+        api = slack_client._api
+
+    saida = {}
+    for marco in marcos:
+        criteria = json.dumps({"contains_text": marco}, ensure_ascii=False)
+        r = api("canvases.sections.lookup",
+                {"canvas_id": canvas_id, "criteria": criteria}, get=False)
+        saida[marco] = None if r is None else bool(r.get("sections"))
+    return saida
+
+
+def _canvas_publicados(canal: str) -> list:
+    """Os ids que NÓS publicamos, do banco. Sem `files.list` não há como
+    descobrir canvas alheio — e chutar seria pior que declarar o limite."""
+    from src.db.connection import get_db_connection
+
+    ids = []
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            for tabela, coluna, alvo in (
+                    ("slack_canvas", "channel_id", None),
+                    ("slack_canvas_mensal", "chave", canal)):
+                cur.execute("SELECT to_regclass(%s) IS NOT NULL", (tabela,))
+                if not cur.fetchone()[0]:
+                    continue
+                if alvo:
+                    cur.execute(
+                        f"SELECT canvas_id FROM {tabela} WHERE {coluna} LIKE %s",
+                        (f"{alvo}:%",))
+                else:
+                    cur.execute(f"SELECT canvas_id FROM {tabela}")
+                ids += [r[0] for r in cur.fetchall() if r[0]]
+    finally:
+        conn.close()
+    return sorted(set(ids))  # lista, nao set: o relatorio fatia com [:4]
 
 
 # --- leitura real ----------------------------------------------------------
@@ -331,7 +414,26 @@ def auditar_canal(canal: str, dias: int = 7) -> dict:
                          f"aprovação"}
     ids_msgs = [i for t in textos for i in ids_no_texto(t)]
 
-    canvas, canvas_ilegivel = _canvas_do_canal(cid)
+    canvas, _sem_files_read = _canvas_do_canal(cid)
+
+    # A API de Canvas nao precisa de files:read. Conferimos os marcos que o
+    # Canvas TEM que conter, nos ids que nos publicamos.
+    # NOME PROPRIO, NAO `publicados`: mais abaixo `publicados` passa a ser o
+    # conjunto de ORDER_IDS vistos no canal. A primeira versao reusou o nome e
+    # o relatorio passou a imprimir numero de pedido no lugar de id de canvas.
+    marcos = {}
+    ids_dos_canvas = _canvas_publicados(canal)
+    for fid in ids_dos_canvas:
+        for marco, achou in verificar_marcos(
+                fid, MARCOS_ESPERADOS.get(canal, [])).items():
+            # Basta um Canvas do canal ter o marco. None so vence se nenhum
+            # outro respondeu -- "nao consegui olhar" nao apaga um "achei".
+            if marcos.get(marco) is not True:
+                marcos[marco] = achou if achou is not None else marcos.get(marco)
+
+    faltando_no_canvas = [m for m, v in marcos.items() if v is False]
+    canvas_ilegivel = bool(MARCOS_ESPERADOS.get(canal)) and not ids_dos_canvas
+
     ids_canvas = []
     for c in canvas:
         ids_canvas += list(ids_no_texto(c["markdown"]))
@@ -355,6 +457,11 @@ def auditar_canal(canal: str, dias: int = 7) -> dict:
     r = resumir_auditoria(canal, dup_canvas, falt, div,
                           lidos=len(textos) + len(canvas),
                           canvas_ilegivel=canvas_ilegivel)
+    if faltando_no_canvas:
+        r["ok"] = False
+        r["texto"] += (" | Canvas SEM: " + ", ".join(faltando_no_canvas))
+    r.update({"marcos_canvas": marcos, "canvas_ids": ids_dos_canvas,
+              "canvas_faltando": faltando_no_canvas})
     r.update({"mensagens": len(textos), "canvas": canvas,
               "ids_mensagens": len(set(ids_msgs)),
               "ids_canvas": len(set(ids_canvas)),
@@ -377,7 +484,11 @@ def main() -> int:
         print(f"CANAL {canal}")
         print("=" * 92)
         print(f"  mensagens lidas    : {r.get('mensagens', 0)}")
-        print(f"  canvas encontrados : {len(r.get('canvas') or [])}")
+        ids = list(r.get("canvas_ids") or [])
+        print(f"  canvas publicados  : {len(ids)}  {', '.join(ids[:4])}")
+        for marco, achou in (r.get("marcos_canvas") or {}).items():
+            simbolo = {True: "OK   ", False: "FALTA", None: "?    "}[achou]
+            print(f"     {simbolo} {marco}")
         for c in (r.get("canvas") or []):
             n = len(ids_no_texto(c["markdown"]))
             print(f"     - {c['titulo']!r}  ({len(c['markdown'])} chars, "
@@ -405,4 +516,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
 
