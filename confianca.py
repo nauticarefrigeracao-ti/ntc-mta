@@ -81,6 +81,55 @@ def cobertura_conciliacao(total: int, conciliados: int) -> float:
 # Depois disto, o numero do mes comeca a nascer parcial sem ninguem perceber.
 DIAS_COLETA_ACEITAVEL = 7
 
+# `orders` e alimentada pelo CI a cada 2h. Dois dias sem venda nova ja e
+# anormal -- e o custo de descobrir tarde e a cadeia inteira, nao uma tabela.
+DIAS_ORDERS_ACEITAVEL = 2
+
+
+def checar_orders_frescos(dias_desde_ultima_venda: Optional[int]
+                          ) -> Optional[Achado]:
+    """A tabela-raiz da fila esta viva?
+
+    De 23/07 a 04/08/2026 -- 13 dias -- `orders` ficou congelada. O
+    `ml_live_poll.py` rodava na maquina do Lucas e morreu; nenhum workflow do
+    GitHub tocava `orders` (o sync cuidava de claims e CMV). Nada ficou
+    vermelho, entao ninguem percebeu.
+
+    A cadeia desceu junto, em silencio: 47 de 86 devolucoes de 24/07+ (55%)
+    sem pedido em `orders`; o coletor de saldos e o motor de estimativa partem
+    `FROM orders` e nunca enfileiraram os novos; sem saldo, o Slack rotulava
+    "conciliacao financeira pendente" enquanto a pagina do Mercado Livre ja
+    mostrava a venda fechada com o valor -- na cara do chefe.
+
+    `checar_coleta_saldos` cobrava a coleta. Faltava o irmao: tabela-raiz de
+    fila tambem tem vigia. Consertar uma vez nao impede a segunda vez.
+    """
+    if dias_desde_ultima_venda is None:
+        return Achado(
+            invariante="orders_frescos",
+            severidade="quebra",
+            resumo="Não consegui ler a data da última venda em `orders`",
+            evidencia="orders vazia ou sem data_venda legível — a fila de "
+                      "saldo nasce daqui; sem isso a cadeia inteira para",
+            acao=("Rode `python scripts/sync_cloud.py --so-orders` e confira "
+                  "o workflow ntc-sync.yml."),
+        )
+    if dias_desde_ultima_venda <= DIAS_ORDERS_ACEITAVEL:
+        return None
+    return Achado(
+        invariante="orders_frescos",
+        severidade="quebra",
+        resumo="A tabela `orders` parou de receber vendas — a fila de saldo "
+               "nasce dela",
+        evidencia=f"última venda há {dias_desde_ultima_venda} dias "
+                  f"(aceitável: até {DIAS_ORDERS_ACEITAVEL}) — o coletor de "
+                  f"saldo e o motor partem FROM orders, então a cadeia "
+                  f"inteira para junto, em silêncio",
+        acao=("Rode `python scripts/sync_cloud.py --so-orders` agora e veja "
+              "por que o ntc-sync.yml parou de atualizar orders. Em 23/07 "
+              "isso ficou 13 dias sem ninguém notar."),
+    )
+
 
 def checar_coleta_saldos(dias_desde_ultima: Optional[int]) -> Optional[Achado]:
     """A coleta de saldos esta em dia?
@@ -338,7 +387,21 @@ def rodar_bateria() -> tuple[float, list[Achado]]:
                     ult = ult.replace(tzinfo=_tz.utc)
                 dias_coleta = (_dt.now(_tz.utc) - ult).days
 
+            # Frescor de `orders`: a tabela-raiz da FILA. Ela congelou 13 dias
+            # (23/07 a 04/08) e derrubou coletor e motor junto, sem nada ficar
+            # vermelho. Consertar uma vez nao impede a segunda.
+            cur.execute("SELECT MAX(data_venda) FROM orders")
+            linha_orders = cur.fetchone()
+            dias_orders = None
+            if linha_orders and linha_orders[0]:
+                from datetime import datetime as _dt2, timezone as _tz2
+                ult_venda = linha_orders[0]
+                if getattr(ult_venda, "tzinfo", None) is None:
+                    ult_venda = ult_venda.replace(tzinfo=_tz2.utc)
+                dias_orders = (_dt2.now(_tz2.utc) - ult_venda).days
+
             for a in (checar_conciliados_nao_caiu(conciliados or 0, anterior_abs),
+                      checar_orders_frescos(dias_orders),
                       checar_coleta_saldos(dias_coleta),
                       checar_order_ids_reais(ids),
                       checar_duplicatas(claims_fechamento)):
