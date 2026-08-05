@@ -66,22 +66,37 @@ def resumir_mes(casos: Iterable[Mapping[str, Any]]) -> dict:
             vistos.add(ident)
         unicos.append(c)
 
+    # DINHEIRO E POR PEDIDO, ATENDIMENTO E POR CLAIM. `meli_page_saldos`
+    # guarda o saldo do PEDIDO. Julho tem o pedido 2000017031981690 com dois
+    # claims fechados: somar por claim contou o mesmo -R$ 144,15 duas vezes e
+    # o prejuizo do mes saiu -R$ 6.074,99 em vez de -R$ 5.930,84. Achado na
+    # vespera da reuniao de conciliacao, em que cada linha ia ser aberta.
+    # Contar o atendimento duas vezes esta certo -- o SAC trabalhou duas.
+    pedidos_somados: set = set()
+
     neg = zer = rev = sem = 0
     prejuizo = revertido = receita = reembolsado = 0.0
     for c in unicos:
         s = c.get("saldo")
-        receita += float(c.get("order_total") or 0)
-        reembolsado += float(c.get("amount_refunded") or 0)
+        oid = c.get("order_id")
+        novo_pedido = oid is None or oid not in pedidos_somados
+        if oid is not None:
+            pedidos_somados.add(oid)
+        if novo_pedido:
+            receita += float(c.get("order_total") or 0)
+            reembolsado += float(c.get("amount_refunded") or 0)
         if s is None:
             sem += 1
             continue
         s = float(s)
         if s < 0:
             neg += 1
-            prejuizo += s
+            if novo_pedido:
+                prejuizo += s
         elif s > 0:
             rev += 1
-            revertido += s
+            if novo_pedido:
+                revertido += s
         else:
             zer += 1
 
@@ -104,18 +119,28 @@ def resumir_mes(casos: Iterable[Mapping[str, Any]]) -> dict:
 
 def meses_a_publicar(hoje: Optional[datetime] = None,
                      quantos: int = 2) -> list[tuple[int, int]]:
-    """Os meses que a rodada de hoje reabre, do mais recente para o mais antigo.
+    """Os meses FECHADOS que a rodada de hoje reabre, do mais recente ao mais
+    antigo.
 
     Por que mais de um: a apuração de saldo do Mercado Livre chega DEPOIS do
     caso encerrar. Em 03/08/2026, julho ainda tinha 72 de 292 casos (25%) sem
     saldo. Publicar só uma vez, no dia 1, congelaria o mês num número parcial
     — e o chefe leria como fechado o que ainda ia mudar.
+
+    Por que nunca o mês corrente: em 05/08/2026 o #sac-fechamento tinha DOIS
+    Canvas mensais, julho e agosto. Agosto com 5 dias corridos não é
+    fechamento de mês — o fechamento diário do dia anterior o próprio canal já
+    faz. Dois balanços mensais lado a lado levantam a pergunta que derruba o
+    resto: "então qual dos dois vale?".
     """
     if quantos < 1:
         raise ValueError("quantos precisa ser >= 1 — rodada que publica zero "
                          "meses sai verde sem ter feito nada")
     hoje = hoje or datetime.now(timezone.utc)
-    saida, ano, mes = [], hoje.year, hoje.month
+    saida: list[tuple[int, int]] = []
+    ano, mes = hoje.year, hoje.month - 1
+    if mes == 0:
+        ano, mes = ano - 1, 12
     for _ in range(quantos):
         saida.append((ano, mes))
         mes -= 1
@@ -161,7 +186,16 @@ def secao_onde_vaza(motivos: list, skus: list) -> str:
     if not motivos and not skus:
         return ""  # cabeçalho sem linha embaixo faz o leitor achar que quebrou
 
-    L = ["## 💸 Onde o dinheiro vaza", ""]
+    # A JANELA PRECISA ESTAR ESCRITA. Sao 3 meses de proposito (4 casos num
+    # mes nao dizem nada, 96 no trimestre dizem para quem decide compra), mas
+    # sem o rotulo o Canvas exibia "Produto nao funciona -- R$ 9.937,78" logo
+    # abaixo de "Prejuizo do mes: R$ 5.930,84". A pergunta "por que a parte e
+    # maior que o todo?" derruba o numero inteiro, e a resposta certa chega
+    # tarde demais quando a duvida ja foi levantada.
+    L = ["## 💸 Onde o dinheiro vaza", "",
+         "_Janela de **3 meses**, não do mês: um motivo com 4 casos no mês "
+         "não diz nada, 96 no trimestre dizem. Por isso os valores abaixo "
+         "são maiores que o prejuízo do mês._", ""]
 
     if motivos:
         total = sum(abs(float(m.get("prejuizo") or 0)) for m in motivos)
@@ -345,19 +379,33 @@ def coletar_mes(ano: int, mes: int) -> tuple[dict, list, list, list]:
             # julho tem 99,7%. Sem declarar isso, a tabela histórica faz
             # artefato de coleta parecer tendência do negócio.
             cur.execute("""
-                SELECT TO_CHAR(d.date_updated::timestamptz, 'YYYY-MM') AS mes,
-                       COUNT(DISTINCT d.claim_id) AS casos,
-                       COALESCE(SUM(s.total) FILTER (WHERE s.total < 0), 0) AS prejuizo,
-                       ROUND(100.0 * COUNT(DISTINCT d.claim_id)
-                             FILTER (WHERE s.total IS NOT NULL)
-                             / NULLIF(COUNT(DISTINCT d.claim_id), 0), 1)
+                -- Prejuizo somado por PEDIDO (o saldo e do pedido), casos
+                -- contados por claim (o SAC atendeu cada um). Somar o saldo
+                -- direto no JOIN dobrava o valor quando um pedido tinha dois
+                -- claims -- foi o que inflou julho em R$ 144,15.
+                SELECT mes,
+                       COUNT(DISTINCT claim_id) AS casos,
+                       COALESCE(SUM(total_pedido), 0) AS prejuizo,
+                       ROUND(100.0 * COUNT(DISTINCT claim_id)
+                             FILTER (WHERE tem_saldo)
+                             / NULLIF(COUNT(DISTINCT claim_id), 0), 1)
                          AS cobertura_pct
-                FROM ml_devolucoes d
-                LEFT JOIN meli_page_saldos s ON s.order_id = d.order_id
-                WHERE d.claim_status = 'closed'
-                  AND d.date_updated ~ '^[0-9]{4}-'
-                  AND d.date_updated::timestamptz < %s
-                  AND d.date_updated::timestamptz >= %s - interval '6 months'
+                FROM (
+                    SELECT TO_CHAR(d.date_updated::timestamptz, 'YYYY-MM') AS mes,
+                           d.claim_id,
+                           (s.total IS NOT NULL) AS tem_saldo,
+                           CASE WHEN s.total < 0 AND d.claim_id = (
+                                    SELECT MIN(d2.claim_id) FROM ml_devolucoes d2
+                                    WHERE d2.order_id = d.order_id
+                                      AND d2.claim_status = 'closed')
+                                THEN s.total END AS total_pedido
+                    FROM ml_devolucoes d
+                    LEFT JOIN meli_page_saldos s ON s.order_id = d.order_id
+                    WHERE d.claim_status = 'closed'
+                      AND d.date_updated ~ '^[0-9]{4}-'
+                      AND d.date_updated::timestamptz < %s
+                      AND d.date_updated::timestamptz >= %s - interval '6 months'
+                ) t
                 GROUP BY 1 ORDER BY 1 DESC
             """, (ini, ini))
             historico = cur.fetchall()

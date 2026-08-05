@@ -24,24 +24,32 @@ def _em(ano, mes, dia=15):
     return datetime(ano, mes, dia, tzinfo=timezone.utc)
 
 
-def test_publica_o_mes_corrente_e_o_anterior():
-    """O corrente porque o chefe quer ver o mês andando; o anterior porque é
-    justamente ele que ainda está recebendo saldo atrasado."""
-    assert meses_a_publicar(_em(2026, 8), quantos=2) == [(2026, 8), (2026, 7)]
+# CORRIGIDO EM 05/08/2026. A versão anterior destes quatro testes exigia o
+# MÊS CORRENTE na lista, justificada com "o chefe quer ver o mês andando".
+# Na prática isso pôs um Canvas "fechamento de agosto" no #sac-fechamento no
+# dia 5, ao lado do de julho — e o mês andando o fechamento diário já mostra.
+# Dois balanços mensais no mesmo canal levantam a pergunta que derruba os
+# dois: "então qual dos dois vale?". Teste que fixa comportamento errado é
+# pior que teste nenhum: dá cobertura formal à falha.
+
+def test_publica_os_dois_ultimos_meses_fechados():
+    """Julho porque acabou de fechar e ainda recebe saldo atrasado; junho
+    porque comparar mês a mês é o que dá sentido ao número."""
+    assert meses_a_publicar(_em(2026, 8), quantos=2) == [(2026, 7), (2026, 6)]
 
 
 def test_atravessa_a_virada_do_ano():
-    """Janeiro tem que reabrir dezembro do ano anterior, não o mês 0."""
-    assert meses_a_publicar(_em(2026, 1), quantos=2) == [(2026, 1), (2025, 12)]
+    """Janeiro reabre dezembro e novembro do ano anterior, não o mês 0."""
+    assert meses_a_publicar(_em(2026, 1), quantos=2) == [(2025, 12), (2025, 11)]
 
 
 def test_tres_meses_para_tras():
     assert meses_a_publicar(_em(2026, 2), quantos=3) == [
-        (2026, 2), (2026, 1), (2025, 12)]
+        (2026, 1), (2025, 12), (2025, 11)]
 
 
-def test_um_mes_so_e_o_corrente():
-    assert meses_a_publicar(_em(2026, 8), quantos=1) == [(2026, 8)]
+def test_um_mes_so_e_o_ultimo_fechado():
+    assert meses_a_publicar(_em(2026, 8), quantos=1) == [(2026, 7)]
 
 
 def test_quantos_invalido_e_erro_e_nao_lista_vazia():

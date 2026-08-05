@@ -127,3 +127,44 @@ def test_resumir_mes_nao_deixou_de_separar_os_desfechos():
     r = resumir_mes(casos)
     assert (r["negativos"], r["zerados"], r["revertidos"]) == (1, 1, 1)
     assert r["prejuizo"] == -100.0
+
+
+# --- 05/08/2026: dinheiro é por PEDIDO, atendimento é por claim ------------
+#
+# `meli_page_saldos` guarda o saldo do PEDIDO. Julho tem o pedido
+# 2000017031981690 com dois claims fechados: somar por claim contou o mesmo
+# -R$ 144,15 duas vezes e o prejuízo do mês saiu -R$ 6.074,99 em vez de
+# -R$ 5.930,84. Achado na véspera da reunião de conciliação com a diretoria,
+# em que cada linha ia ser aberta.
+
+def test_dois_claims_no_mesmo_pedido_nao_dobram_o_prejuizo():
+    r = resumir_mes([
+        {"claim_id": 1, "order_id": 777, "saldo": -144.15, "order_total": 0},
+        {"claim_id": 2, "order_id": 777, "saldo": -144.15, "order_total": 0},
+    ])
+    assert r["prejuizo"] == -144.15
+
+
+def test_dois_claims_no_mesmo_pedido_continuam_dois_atendimentos():
+    """O SAC trabalhou duas vezes. Esconder isso apagaria trabalho feito."""
+    r = resumir_mes([
+        {"claim_id": 1, "order_id": 777, "saldo": -144.15, "order_total": 0},
+        {"claim_id": 2, "order_id": 777, "saldo": -144.15, "order_total": 0},
+    ])
+    assert r["casos"] == 2
+
+
+def test_pedidos_distintos_com_mesmo_valor_somam_os_dois():
+    r = resumir_mes([
+        {"claim_id": 1, "order_id": 777, "saldo": -144.15, "order_total": 0},
+        {"claim_id": 2, "order_id": 778, "saldo": -144.15, "order_total": 0},
+    ])
+    assert r["prejuizo"] == -288.30
+
+
+def test_revertido_tambem_conta_por_pedido():
+    r = resumir_mes([
+        {"claim_id": 1, "order_id": 777, "saldo": 425.35, "order_total": 0},
+        {"claim_id": 2, "order_id": 777, "saldo": 425.35, "order_total": 0},
+    ])
+    assert r["revertido"] == 425.35

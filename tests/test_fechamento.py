@@ -64,18 +64,25 @@ def test_conta_as_tres_categorias():
     assert "Revertido" in corpo
 
 
-def test_saldo_do_dia_e_a_soma():
+# CORRIGIDO EM 05/08/2026. Estes dois testes exigiam a SOMA de prejuízo com
+# revertido ("-100 -50 +0 +200 = +50"). Revertido é receita de venda que ficou
+# de pé: houve reclamação, não houve devolução. A soma fez o canal publicar
+# em 31/07 "saldo R$ 425,35 — 0 com prejuízo", que a diretoria lê como
+# "devolução deu lucro". A manchete de um painel de perdas é a perda.
+
+def test_manchete_do_dia_e_o_prejuizo_nao_a_soma():
     rows = [_c(-100.0), _c(-50.0), _c(0.0), _c(200.0)]
     _, blocks = montar_fechamento(rows, "29/07/2026")
-    # -100 -50 +0 +200 = +50
-    assert "50,00" in _txt(blocks)
+    corpo = _txt(blocks)
+    assert "R$ -150,00" in corpo        # prejuízo real
+    assert "R$ 50,00" not in corpo      # a soma nunca vira manchete
 
 
-def test_saldo_negativo_do_dia_aparece_com_sinal():
+def test_prejuizo_do_dia_aparece_com_sinal():
     rows = [_c(-300.0), _c(100.0)]
     _, blocks = montar_fechamento(rows, "29/07/2026")
     corpo = _txt(blocks)
-    assert "200,00" in corpo
+    assert "300,00" in corpo
     assert "-" in corpo
 
 

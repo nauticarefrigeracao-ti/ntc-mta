@@ -94,3 +94,30 @@ def test_motivo_cru_do_ml_nao_vai_cru_para_o_chefe():
     cru = [{"chave": "PDD9952", "casos": 4, "prejuizo": -179.10}]
     txt = secao_onde_vaza(cru, [])
     assert "PDD9952" not in txt or "código" in txt.lower()
+
+
+# --- 05/08/2026: a janela precisa estar escrita no Canvas -----------------
+#
+# O bloco "Onde o dinheiro vaza" usa 3 MESES de propósito -- 4 casos num mês
+# não dizem nada, 96 no trimestre dizem para quem decide compra. Só que o
+# Canvas de julho exibia "Produto não funciona — R$ 9.937,78" logo abaixo de
+# "Prejuízo do mês: R$ 5.930,84". Na reunião de conciliação, em que cada linha
+# ia ser aberta, a primeira pergunta seria "por que a parte é maior que o
+# todo?" -- e a resposta certa ("são trimestres diferentes") chega tarde
+# demais quando a dúvida já foi levantada.
+
+def test_secao_declara_a_janela_de_tres_meses():
+    md = secao_onde_vaza(
+        [{"chave": "Produto não funciona", "casos": 96, "prejuizo": -9937.78}],
+        [])
+    assert "3 meses" in md or "trimestre" in md
+
+
+def test_janela_aparece_antes_da_tabela():
+    """Ler o número primeiro e o rótulo depois já produziu a dúvida."""
+    md = secao_onde_vaza(
+        [{"chave": "Produto não funciona", "casos": 96, "prejuizo": -9937.78}],
+        [])
+    pos_janela = min(md.find("3 meses"), md.find("trimestre")) if (
+        "3 meses" in md or "trimestre" in md) else -1
+    assert 0 <= pos_janela < md.find("| Motivo |")

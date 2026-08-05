@@ -924,7 +924,11 @@ def montar_fechamento(rows, data_str: str) -> tuple[str, list[dict]]:
     negativos = sorted(grupos["negativo"], key=lambda r: float(r["saldo"]))
     total_prejuizo = sum(float(r["saldo"]) for r in negativos)
     total_revertido = sum(float(r["saldo"]) for r in grupos["revertido"])
-    saldo_dia = total_prejuizo + total_revertido
+    # NAO somar prejuizo com revertido. Revertido e receita de venda que ficou
+    # de pe -- houve reclamacao, nao houve devolucao. A soma produzia manchete
+    # positiva num painel cujo assunto e perda: em 31/07 o canal publicou
+    # "saldo R$ 425,35 -- 0 com prejuizo", que a diretoria le como "devolucao
+    # deu lucro". Mesmo defeito ja corrigido no Canvas mensal em 03/08.
 
     blocks: list[dict] = [{
         "type": "header",
@@ -937,7 +941,7 @@ def montar_fechamento(rows, data_str: str) -> tuple[str, list[dict]]:
         return f"Fechamento {data_str}: nenhum processo fechado.", blocks
 
     blocks.append({"type": "section", "fields": [
-        {"type": "mrkdwn", "text": f"*Saldo do dia*\n{_fmt_brl(saldo_dia)}"},
+        {"type": "mrkdwn", "text": f"*Prejuízo do dia*\n{_fmt_brl(total_prejuizo)}"},
         {"type": "mrkdwn", "text": f"*Casos fechados*\n{len(rows)}"},
     ]})
     blocks.append({"type": "divider"})
@@ -970,9 +974,12 @@ def montar_fechamento(rows, data_str: str) -> tuple[str, list[dict]]:
                        "text": (f"_{len(grupos['pendente'])} caso(s) com conciliação financeira pendente — "
                                 "ainda não entram no saldo._")}]})
 
-    texto = (f"Fechamento {data_str}: saldo {_fmt_brl(saldo_dia)} — "
-             f"{len(negativos)} com prejuízo ({_fmt_brl(total_prejuizo)}), "
-             f"{len(grupos['zero'])} cobertos, {len(grupos['revertido'])} revertidos.")
+    manchete = (f"prejuízo {_fmt_brl(total_prejuizo)} em {len(negativos)} caso(s)"
+                if negativos else "sem prejuízo")
+    texto = (f"Fechamento {data_str}: {manchete} — "
+             f"{len(grupos['zero'])} cobertos pelo ML, "
+             f"{len(grupos['revertido'])} revertidos "
+             f"(+{_fmt_brl(total_revertido)} de venda que ficou de pé).")
     return texto, blocks
 
 
