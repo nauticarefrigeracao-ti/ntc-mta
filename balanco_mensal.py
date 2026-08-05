@@ -237,10 +237,70 @@ def motivo_legivel(chave: Any) -> str:
     return texto
 
 
+def secao_venda_por_venda(vendas: Optional[list]) -> str:
+    """A lista completa do mes, do primeiro ao ultimo dia, com link.
+
+    A Thayna mantem um Excel com o SAC acompanhando devolucao por devolucao e
+    tentando reverter -- e e esse trabalho que explica os numeros melhorando
+    mes a mes. Na reuniao a conciliacao e feita CONTRA esse Excel, linha a
+    linha.
+
+    Total agregado nao concilia com nada: "R$ 5.930,84" nao diz qual venda o
+    Excel tem que a gente nao tem, nem o contrario. Por isso a lista inteira,
+    inclusive as vendas que nao custaram nada -- as 147 cobertas pelo ML e as
+    76 revertidas sao justamente as que o Excel usa para provar reversao.
+
+    Uma linha por PEDIDO: o Excel tem uma linha por venda, e o pedido
+    2000017031981690 tem dois claims fechados em julho.
+    """
+    if not vendas:
+        return ""
+
+    def quando(v):
+        return str(v.get("date_updated") or "")
+
+    vistos, unicos = set(), []
+    for v in sorted(vendas, key=quando):
+        oid = v.get("order_id")
+        if oid in vistos:
+            continue
+        vistos.add(oid)
+        unicos.append(v)
+
+    rotulos = {"prejuizo": "🔴 prejuízo", "coberto": "⚪ ML cobriu",
+               "revertido": "🟢 venda de pé", "pendente": "⏳ sem apuração"}
+
+    L = ["## 🧾 Venda por venda", "",
+         f"_As **{len(unicos)}** vendas do mês, do primeiro ao último dia. "
+         "É esta lista que fecha contra o Excel do SAC, linha a linha. "
+         "Clique no pedido para abrir a venda no Mercado Livre._", "",
+         "| Dia | Pedido | SKU | Motivo | Desfecho | Resultado |",
+         "|---|---|---|---|---|---|"]
+
+    for v in unicos:
+        saldo = v.get("saldo")
+        if saldo is None:
+            desfecho, valor = "pendente", "—"
+        else:
+            s = float(saldo)
+            desfecho = ("prejuizo" if s < 0 else
+                        "revertido" if s > 0 else "coberto")
+            valor = _fmt_brl(s)
+        oid = v.get("order_id")
+        link = (f"[{oid}](https://www.mercadolivre.com.br/vendas/{oid}/detalhe)"
+                if oid else "—")
+        motivo = str(v.get("reason_label") or "—").replace("|", "/")[:34]
+        L.append(f"| {quando(v)[8:10]} | {link} | {v.get('item_sku') or '—'} | "
+                 f"{motivo} | {rotulos[desfecho]} | {valor} |")
+
+    return "\n".join(L)
+
+
 def montar_canvas_mensal(mes_label: str, r: Mapping[str, Any],
                          historico: list,
                          motivos: Optional[list] = None,
-                         skus: Optional[list] = None) -> str:
+                         skus: Optional[list] = None,
+                         vendas: Optional[list] = None) -> str:
     """Markdown do Canvas mensal.
 
     O TITULAR É O PREJUÍZO, não um "saldo".
@@ -258,7 +318,12 @@ def montar_canvas_mensal(mes_label: str, r: Mapping[str, Any],
     def brl(v):
         return _fmt_brl(v) if v is not None else "—"
 
-    L = [f"# 📊 Balanço do SAC — {mes_label}", ""]
+    # SEM TITULO AQUI. O Canvas e criado com titulo="Balanco julho/2026" e o
+    # Slack renderiza esse nome como cabecalho da pagina. Repetir no markdown
+    # punha DOIS titulos quase iguais na tela, e a pergunta que veio foi "tem
+    # dois balancos de julho?". Cabecalho duplicado nao e estetica: faz
+    # duvidar de qual e o documento.
+    L: list[str] = []
 
     if not r.get("casos"):
         L.append("_Nenhum caso encerrado neste mês._")
@@ -348,6 +413,13 @@ def montar_canvas_mensal(mes_label: str, r: Mapping[str, Any],
                 L.append(f"_Prejuízo {abs(v):.0f}% {direcao} do mês anterior._")
         L.append("")
 
+    # A lista completa vem no FIM, de proposito: quem quer o numero le o topo,
+    # quem vai conciliar contra o Excel desce.
+    lista = secao_venda_por_venda(vendas)
+    if lista:
+        L.append(lista)
+        L.append("")
+
     L.append("---")
     L.append(f"_Gerado automaticamente do banco · "
              f"{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')} UTC_")
@@ -356,7 +428,7 @@ def montar_canvas_mensal(mes_label: str, r: Mapping[str, Any],
 
 # --- coleta e publicação ---------------------------------------------------
 
-def coletar_mes(ano: int, mes: int) -> tuple[dict, list, list, list]:
+def coletar_mes(ano: int, mes: int) -> tuple[dict, list, list, list, list]:
     from src.db.connection import get_db_connection, dict_cursor
 
     ini, fim = periodo_do_mes(ano, mes)
@@ -364,16 +436,45 @@ def coletar_mes(ano: int, mes: int) -> tuple[dict, list, list, list]:
     try:
         with dict_cursor(conn) as cur:
             cur.execute("""
-                SELECT d.claim_id, d.order_id, d.order_total,
+                -- Receita vem de `order_items` quando existe: o campo
+                -- `order_total` ignora quantidade. Medido em 05/08/2026
+                -- conferindo contra a API do ML: 2000017376418588 tinha
+                -- order_total 659,00 e o ML mostra 1.318,00 (2 unidades).
+                -- Sao 6 pedidos em julho; a receita do mes subia de
+                -- R$ 91.543,40 para R$ 92.290,62. Nao afeta o prejuizo, que
+                -- vem de meli_page_saldos.
+                SELECT d.claim_id, d.order_id,
+                       COALESCE(i.soma, d.order_total) AS order_total,
                        d.amount_refunded, s.total AS saldo
                 FROM ml_devolucoes d
                 LEFT JOIN meli_page_saldos s ON s.order_id = d.order_id
+                LEFT JOIN (
+                    SELECT order_id, SUM(unidades * preco_unitario) AS soma
+                    FROM order_items GROUP BY order_id
+                ) i ON i.order_id = d.order_id::text
                 WHERE d.claim_status = 'closed'
                   AND d.date_updated ~ '^[0-9]{4}-'
                   AND d.date_updated::timestamptz >= %s
                   AND d.date_updated::timestamptz <  %s
             """, (ini, fim))
             casos = cur.fetchall()
+
+            # Venda por venda, do primeiro ao ultimo dia: e esta lista que
+            # fecha contra o Excel do SAC na conciliacao. Total agregado nao
+            # concilia com nada -- nao diz qual venda o Excel tem que a gente
+            # nao tem, nem o contrario.
+            cur.execute("""
+                SELECT d.order_id, d.claim_id, d.item_sku, d.item_title,
+                       d.reason_label, d.date_updated, s.total AS saldo
+                FROM ml_devolucoes d
+                LEFT JOIN meli_page_saldos s ON s.order_id = d.order_id
+                WHERE d.claim_status = 'closed'
+                  AND d.date_updated ~ '^[0-9]{4}-'
+                  AND d.date_updated::timestamptz >= %s
+                  AND d.date_updated::timestamptz <  %s
+                ORDER BY d.date_updated
+            """, (ini, fim))
+            vendas = cur.fetchall()
 
             # A cobertura de cada mês vem junto: janeiro tinha 57% apurado e
             # julho tem 99,7%. Sem declarar isso, a tabela histórica faz
@@ -434,15 +535,15 @@ def coletar_mes(ano: int, mes: int) -> tuple[dict, list, list, list]:
         conn.close()
 
     return (resumir_mes(casos), [dict(h) for h in historico],
-            vaza["motivos"], vaza["skus"])
+            vaza["motivos"], vaza["skus"], [dict(v) for v in vendas])
 
 
 def publicar(ano: int, mes: int, canal: str = CANAL_FECHAMENTO) -> bool:
     from src.db.connection import get_db_connection
 
-    resumo, historico, motivos, skus = coletar_mes(ano, mes)
+    resumo, historico, motivos, skus, vendas = coletar_mes(ano, mes)
     markdown = montar_canvas_mensal(nome_do_mes(ano, mes), resumo, historico,
-                                    motivos=motivos, skus=skus)
+                                    motivos=motivos, skus=skus, vendas=vendas)
 
     cid = slack_client.garantir_canal(canal)
     if not cid:
@@ -512,9 +613,10 @@ def main() -> int:
 
     if args.dry_run:
         for ano, mes in alvos:
-            resumo, historico, motivos, skus = coletar_mes(ano, mes)
+            resumo, historico, motivos, skus, vendas = coletar_mes(ano, mes)
             print(montar_canvas_mensal(nome_do_mes(ano, mes), resumo,
-                                       historico, motivos=motivos, skus=skus))
+                                       historico, motivos=motivos, skus=skus,
+                                       vendas=vendas))
             print()
         return 0
 

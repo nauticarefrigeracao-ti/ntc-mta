@@ -117,9 +117,15 @@ def _resumo(**over):
     return base
 
 
-def test_canvas_tem_o_mes_no_titulo():
+def test_canvas_nao_repete_o_titulo_da_aba():
+    """CORRIGIDO EM 05/08/2026. Este teste exigia "julho/2026" dentro do
+    markdown. Mas o Canvas é criado com titulo="Balanço julho/2026" e o Slack
+    renderiza esse nome como cabeçalho da página — na tela apareciam DOIS
+    títulos quase iguais, e a pergunta que veio foi "tem dois balanços de
+    julho?". O mês continua identificado, pelo nome da aba."""
     md = montar_canvas_mensal("julho/2026", _resumo(), [])
-    assert "julho/2026" in md
+    assert not md.lstrip().startswith("# ")
+    assert "Prejuízo do mês" in md
 
 
 def test_canvas_mostra_os_kpis_pedidos():

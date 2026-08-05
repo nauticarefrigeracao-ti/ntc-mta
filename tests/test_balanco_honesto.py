@@ -168,3 +168,33 @@ def test_revertido_tambem_conta_por_pedido():
         {"claim_id": 2, "order_id": 777, "saldo": 425.35, "order_total": 0},
     ])
     assert r["revertido"] == 425.35
+
+
+# --- 05/08/2026: o Slack já mostra o título; repetir é ruído --------------
+#
+# O Canvas é criado com titulo="Balanço julho/2026" e o Slack renderiza esse
+# nome como cabeçalho da página. O markdown abria com "# 📊 Balanço do SAC —
+# julho/2026" logo abaixo. Na tela, o chefe via DOIS títulos quase iguais e
+# perguntou se havia dois balanços. Cabeçalho duplicado não é estética: faz
+# duvidar de qual é o documento.
+
+def test_canvas_nao_repete_o_titulo_da_aba():
+    md = montar_canvas_mensal("julho/2026", {"casos": 290, "negativos": 66,
+                                             "zerados": 147, "revertidos": 76,
+                                             "sem_saldo": 1, "prejuizo": -5930.84,
+                                             "revertido": 21503.52,
+                                             "receita": 91543.40,
+                                             "reembolsado": 36790.14,
+                                             "cobertura_pct": 99.7}, [])
+    assert not md.lstrip().startswith("# ")
+
+
+def test_canvas_comeca_pelo_numero_que_importa():
+    md = montar_canvas_mensal("julho/2026", {"casos": 290, "negativos": 66,
+                                             "zerados": 147, "revertidos": 76,
+                                             "sem_saldo": 1, "prejuizo": -5930.84,
+                                             "revertido": 21503.52,
+                                             "receita": 91543.40,
+                                             "reembolsado": 36790.14,
+                                             "cobertura_pct": 99.7}, [])
+    assert "Prejuízo do mês" in md.split("\n")[0]

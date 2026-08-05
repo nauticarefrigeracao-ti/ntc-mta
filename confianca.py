@@ -170,6 +170,106 @@ def checar_token_slack(escopos: Optional[list]) -> Optional[Achado]:
     )
 
 
+def checar_abas_do_canal(canal: str, abas: Optional[list],
+                         oficiais: set) -> Optional[Achado]:
+    """O que a Maria e o chefe ENCONTRAM quando abrem o canal?
+
+    05/08/2026: publiquei o fechamento de julho, conferi por API que os
+    marcadores estavam la, e declarei validado. O Lucas abriu o Slack e viu o
+    que a API nao mostra -- **duas abas "Quadro do SAC"** no #sac. A segunda
+    era um Canvas de 26/07 que ninguem atualiza. Quem clicar nela le numero de
+    duas semanas atras achando que e o de hoje.
+
+    `canvases.sections.lookup` responde "o texto esta la" e fica satisfeito.
+    A pergunta certa e outra: quantas portas existem, e alguma leva a lugar
+    errado? `conversations.info` devolve `properties.tabs` e devolve **sem**
+    `files:read` -- medido em 05/08. A checagem estava disponivel o tempo
+    todo; faltou olhar a tela em vez de olhar o conteudo.
+
+    Rotulo vazio conta como duplicata: o Slack exibe o titulo do proprio
+    Canvas, e na tela ficam dois iguais enquanto na API um esta vazio.
+    """
+    canvas = [a for a in (abas or []) if a.get("type") == "canvas"]
+    if not canvas:
+        return None
+
+    def rotulo(a):
+        return (a.get("label") or "").strip()
+
+    def fid(a):
+        return ((a.get("data") or {}).get("file_id")) or ""
+
+    sobrando = [a for a in canvas if fid(a) not in oficiais]
+
+    vistos, repetidos = {}, []
+    for a in canvas:
+        chave = rotulo(a) or "(sem rótulo — o Slack exibe o título do Canvas)"
+        if chave in vistos:
+            repetidos.append(a)
+        vistos[chave] = a
+
+    # Rótulo vazio ao lado de qualquer outro canvas: na tela os dois aparecem
+    # com o título do Canvas, então visualmente são duplicata mesmo que a API
+    # os mostre diferentes.
+    sem_rotulo = [a for a in canvas if not rotulo(a)]
+    if sem_rotulo and len(canvas) > 1:
+        repetidos += [a for a in sem_rotulo if a not in repetidos]
+
+    problemas = {fid(a): a for a in (repetidos + sobrando) if fid(a) not in oficiais}
+    if not problemas:
+        return None
+
+    detalhe = "; ".join(
+        f"{f} (rótulo {rotulo(a)!r})" for f, a in problemas.items())
+    return Achado(
+        invariante="abas_do_canal",
+        severidade="quebra",
+        resumo=f"{canal}: {len(problemas)} aba(s) de Canvas que não deveriam estar lá",
+        evidencia=(f"{detalhe} — quem clicar lê dado que ninguém atualiza, "
+                   f"achando que é o de hoje"),
+        acao=("Remova a aba no Slack (clique com o botão direito na aba > "
+              "Remover) — o bot não tem `bookmarks:write` para fazer isso. "
+              "Antes, reescreva o Canvas órfão apontando para o oficial, "
+              "porque link já aberto não se quebra."),
+    )
+
+
+def _achados_de_abas(cur) -> list:
+    """Le as abas reais de cada canal e cobra uma porta por proposito.
+
+    Os Canvas oficiais sao os que o sistema mantem: `slack_canvas` (Quadro do
+    SAC) e `slack_canvas_mensal` (balanco do mes). Qualquer outra aba de
+    Canvas no canal e porta para dado que ninguem atualiza.
+    """
+    import slack_client
+
+    oficiais_por_canal: dict = {}
+    try:
+        cur.execute("SELECT canal_id, canvas_id FROM slack_canvas")
+        for canal_id, canvas_id in cur.fetchall():
+            oficiais_por_canal.setdefault(canal_id, set()).add(canvas_id)
+    except Exception as exc:  # tabela ausente e defeito, nao silencio
+        raise RuntimeError(f"slack_canvas ilegivel: {exc}") from exc
+
+    cur.execute("SELECT chave, canvas_id FROM slack_canvas_mensal")
+    mensais = {cid for _, cid in cur.fetchall()}
+
+    achados = []
+    for canal_id in list(oficiais_por_canal):
+        body = slack_client._api("conversations.info",
+                                 {"channel": canal_id}, get=True)
+        if body is None:
+            continue
+        canal = (body.get("channel") or {})
+        abas = (canal.get("properties") or {}).get("tabs") or []
+        oficiais = oficiais_por_canal[canal_id] | mensais
+        a = checar_abas_do_canal(f"#{canal.get('name') or canal_id}",
+                                 abas, oficiais)
+        if a:
+            achados.append(a)
+    return achados
+
+
 def checar_orders_frescos(dias_desde_ultima_venda: Optional[int]
                           ) -> Optional[Achado]:
     """A tabela-raiz da fila esta viva?
@@ -497,6 +597,10 @@ def rodar_bateria() -> tuple[float, list[Achado]]:
                       checar_duplicatas(claims_fechamento)):
                 if a:
                     achados.append(a)
+
+            # Abas do canal: o que o olho encontra, nao o que a API guarda.
+            for a in _achados_de_abas(cur):
+                achados.append(a)
 
             cur.execute("INSERT INTO confianca_placar (cobertura, conciliados) "
                         "VALUES (%s, %s)",

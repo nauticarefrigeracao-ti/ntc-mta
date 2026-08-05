@@ -153,9 +153,43 @@ def prazo_estimado(row: Mapping[str, Any], agora: Optional[datetime] = None) -> 
     return "⏰ Prazo estimado indisponível para esta etapa"
 
 
-def bloco_financeiro(row: Mapping[str, Any], saldo: Optional[float]) -> str:
+def valor_da_venda(row: Mapping[str, Any],
+                   itens: Optional[list] = None) -> Optional[float]:
+    """O valor que a tela do Mercado Livre mostra.
+
+    `ml_devolucoes.order_total` NAO e o total do pedido quando ha mais de uma
+    unidade. Medido em 05/08/2026, conferindo mensagem por mensagem contra a
+    API do ML:
+
+        2000017376418588   publicado R$   659,00   ML R$ 1.318,00   (2 un)
+        2000017277002676   publicado R$   232,98   ML R$   310,64   (4 un)
+
+    `order_items` fecha com o ML nos dois casos. A mensagem existe para o
+    chefe clicar no link e conferir; numero que nao bate com a tela derruba a
+    mensagem, o painel e o balanco de uma vez, porque vem todos da mesma
+    fonte.
+
+    None = desconhecido. Zero nunca e "gratis", e "nao sincronizado".
+    """
+    soma = 0.0
+    for it in (itens or []):
+        un = it.get("unidades")
+        pu = it.get("preco_unitario")
+        if un is None or pu is None:
+            continue
+        soma += float(un) * float(pu)
+    if soma > 0:
+        return round(soma, 2)
+    total = row.get("order_total")
+    return float(total) if total else None
+
+
+def bloco_financeiro(row: Mapping[str, Any], saldo: Optional[float],
+                     itens: Optional[list] = None) -> str:
     """Explica o valor da venda e o desfecho financeiro do processo.
 
+    - o valor sai de `order_items` quando existe, porque `order_total` ignora
+      quantidade -- ver `valor_da_venda`.
     - order_total costuma ser 0 (ainda nao sincronizado) em processos recem
       abertos -- nunca mostramos R$ 0,00 como se fosse o valor real.
     - Processo ainda ABERTO nunca tem desfecho financeiro afirmado.
@@ -163,7 +197,7 @@ def bloco_financeiro(row: Mapping[str, Any], saldo: Optional[float]) -> str:
       ML indenizou/creditou acima do custo; zero = Protecao ao Vendedor
       cobriu (empatou); negativo = prejuizo confirmado.
     """
-    total = row.get("order_total")
+    total = valor_da_venda(row, itens)
     valor_venda = _fmt_brl(total) if total else "ainda não sincronizado"
     linha_venda = f"Valor da venda: {valor_venda}"
 
@@ -338,8 +372,12 @@ def montar_mensagem_lembrete(row: Mapping[str, Any], agora: Optional[datetime] =
 
 
 def montar_mensagem(row: Mapping[str, Any], saldo: Optional[float] = None,
-                     atualizacao: bool = False, agora: Optional[datetime] = None) -> tuple[str, list[dict]]:
-    """Monta o texto final da notificacao do Slack."""
+                     atualizacao: bool = False, agora: Optional[datetime] = None,
+                     itens: Optional[list] = None) -> tuple[str, list[dict]]:
+    """Monta o texto final da notificacao do Slack.
+
+    `itens` vem de `order_items` e manda no valor da venda: `order_total`
+    ignora quantidade e publicava R$ 659,00 onde o ML mostra R$ 1.318,00."""
     cabecalho = "🔄 *Atualização de estado*" if atualizacao else "🚨 *Novo processo*"
     categoria = categorizar(row)
     titulo = row.get("item_title") or "Produto"
@@ -353,7 +391,7 @@ def montar_mensagem(row: Mapping[str, Any], saldo: Optional[float] = None,
         f"{cabecalho} — {categoria}",
         f"*{titulo}* (SKU {sku})",
         f"Motivo: _{motivo}_",
-        bloco_financeiro(row, saldo),
+        bloco_financeiro(row, saldo, itens),
     ]
     tracking = bloco_tracking(row)
     if tracking:
@@ -371,7 +409,7 @@ def montar_mensagem(row: Mapping[str, Any], saldo: Optional[float] = None,
         {"type": "divider"}
     ]
     
-    finance_block = bloco_financeiro(row, saldo)
+    finance_block = bloco_financeiro(row, saldo, itens)
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": finance_block}})
     
     context_elements = []
