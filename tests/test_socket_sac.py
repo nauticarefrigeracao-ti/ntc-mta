@@ -1,0 +1,160 @@
+"""O listener que faz o botão virar ação — Socket Mode.
+
+Sem este processo no ar, botão é decoração: a Maria clica, nada acontece, e
+ela volta a usar o Meli. Pior que não ter botão.
+
+O que o Slack manda quando alguém clica, e o que este arquivo trava:
+
+**1. Ack em 3 segundos ou o Slack reenvia.** Se o ack só sair depois de gravar
+no banco e reescrever o card, o Slack considera perdido e manda de novo — e
+a mesma marcação entra duas vezes na linha do tempo. O ack vem primeiro,
+sempre.
+
+**2. O clique chega sem contexto.** Só `action_id` e `value` carregam o que
+pusermos neles. Se o `claim_id` não vier no `value`, o listener não sabe qual
+caso avançar — e não pode adivinhar.
+
+**3. Nome de gente, não ID.** `U0BH1234` na linha do tempo não responde "quem
+marcou isso". A Thayná pediu quem, e quem é "Maria".
+"""
+import json
+
+import pytest
+
+from socket_sac import (
+    interpretar,
+    modal_de_observacao,
+    nome_de,
+    resposta_de_ack,
+)
+
+
+def envelope_de_clique(action_id="sac_recebi", value="5552858975",
+                       envelope_id="env-1"):
+    return {
+        "envelope_id": envelope_id,
+        "type": "interactive",
+        "payload": {
+            "type": "block_actions",
+            "user": {"id": "U0BH1", "username": "maria",
+                     "name": "maria"},
+            "channel": {"id": "C0BHE11PZ5M"},
+            "message": {"ts": "1754500000.123456"},
+            "trigger_id": "trig-1",
+            "actions": [{"action_id": action_id, "value": value,
+                         "type": "button"}],
+        },
+    }
+
+
+# --- ack primeiro, sempre -------------------------------------------------
+
+def test_ack_devolve_o_envelope_id():
+    """Sem o envelope_id de volta, o Slack reenvia o clique e a marcação
+    entra duas vezes."""
+    assert resposta_de_ack("env-1") == {"envelope_id": "env-1"}
+
+
+def test_ack_e_serializavel():
+    json.dumps(resposta_de_ack("env-1"))
+
+
+# --- interpretar o clique -------------------------------------------------
+
+def test_clique_vira_acao():
+    e = interpretar(envelope_de_clique())
+    assert e["acao"] == "recebi"
+    assert e["claim_id"] == 5552858975
+
+
+def test_traz_onde_atualizar_o_card():
+    """Sem channel e ts não dá para reescrever o card no lugar — viraria
+    mensagem nova a cada clique."""
+    e = interpretar(envelope_de_clique())
+    assert e["channel"] == "C0BHE11PZ5M"
+    assert e["ts"] == "1754500000.123456"
+
+
+def test_traz_quem_clicou():
+    assert interpretar(envelope_de_clique())["quem"] == "maria"
+
+
+def test_traz_o_trigger_para_abrir_modal():
+    assert interpretar(envelope_de_clique())["trigger_id"] == "trig-1"
+
+
+def test_prefixo_sac_e_obrigatorio():
+    """Outros apps e outros botões vivem no mesmo canal. Reagir a tudo é
+    avançar caso por clique alheio."""
+    assert interpretar(envelope_de_clique(action_id="outra_coisa")) is None
+
+
+def test_evento_que_nao_e_clique_e_ignorado():
+    assert interpretar({"envelope_id": "x", "type": "hello"}) is None
+
+
+def test_envelope_sem_payload_nao_explode():
+    assert interpretar({"envelope_id": "x", "type": "interactive"}) is None
+
+
+def test_value_invalido_nao_vira_claim_zero():
+    """`claim_id` inventado grava marcação em caso que não existe."""
+    assert interpretar(envelope_de_clique(value="")) is None
+    assert interpretar(envelope_de_clique(value="abc")) is None
+
+
+def test_envelope_id_vem_junto():
+    assert interpretar(envelope_de_clique())["envelope_id"] == "env-1"
+
+
+# --- nome de gente, não ID ------------------------------------------------
+
+def test_display_name_ganha_do_username():
+    u = {"id": "U1", "username": "maria",
+         "profile": {"display_name": "Maria Souza"}}
+    assert nome_de(u) == "Maria Souza"
+
+
+def test_sem_display_name_usa_username():
+    assert nome_de({"id": "U1", "username": "maria"}) == "maria"
+
+
+def test_sem_nome_nenhum_devolve_o_id():
+    """Melhor um ID do que um None na linha do tempo da Thayná."""
+    assert nome_de({"id": "U1"}) == "U1"
+
+
+def test_usuario_vazio_nao_vira_none():
+    assert nome_de({}) is not None
+
+
+# --- o modal de observação ------------------------------------------------
+
+def test_modal_carrega_o_caso_no_metadata():
+    """O modal volta num envelope separado, sem o card por perto. Sem o
+    claim/channel/ts no private_metadata, a observação não sabe onde pousar."""
+    m = modal_de_observacao(5552858975, "C1", "1754500000.1")
+    meta = json.loads(m["private_metadata"])
+    assert meta["claim_id"] == 5552858975
+    assert meta["channel"] == "C1" and meta["ts"] == "1754500000.1"
+
+
+def test_modal_tem_campo_de_texto():
+    m = modal_de_observacao(1, "C1", "1.1")
+    tipos = [b["element"]["type"] for b in m["blocks"] if "element" in b]
+    assert "plain_text_input" in tipos
+
+
+def test_modal_aceita_texto_longo():
+    """Observação de SAC é relato, não etiqueta."""
+    m = modal_de_observacao(1, "C1", "1.1")
+    el = [b["element"] for b in m["blocks"] if "element" in b][0]
+    assert el.get("multiline") is True
+
+
+def test_modal_tem_titulo_curto():
+    """O Slack recusa title acima de 24 caracteres — e recusa calado, o modal
+    simplesmente não abre."""
+    m = modal_de_observacao(1, "C1", "1.1")
+    assert len(m["title"]["text"]) <= 24
+    assert len(m["submit"]["text"]) <= 24

@@ -1,0 +1,322 @@
+"""Socket Mode -- o processo que faz o botao do card virar acao.
+
+Sem isto no ar, botao e decoracao: a Maria clica, nada acontece, e ela volta
+para o Meli. Pior do que nao ter botao.
+
+Como funciona, medido na documentacao oficial e na conta:
+
+    POST /api/apps.connections.open   (Bearer xapp-...)  -> url wss://
+    <- {"envelope_id": "...", "type": "interactive", "payload": {...}}
+    -> {"envelope_id": "..."}          # o ack, em ate 3 segundos
+
+**O ack vem primeiro, antes de gravar qualquer coisa.** Se ele so sair depois
+do banco e do redesenho do card, o Slack considera o clique perdido e reenvia
+-- e a mesma marcacao entra duas vezes na linha do tempo da Thayna.
+
+**O clique chega sem contexto.** So `action_id` e `value` carregam o que
+pusermos neles. O `claim_id` vai no `value`; sem ele o listener nao sabe qual
+caso avancar, e adivinhar esta fora de questao.
+
+SECURITY: o token de app (xapp-) e lido de SLACK_APP_TOKEN (env / Secret do
+GitHub) ou de C:\\Users\\Pichau\\slack_app_token.txt -- arquivo local, fora do
+repo, nunca commitado. Nunca aparece em log, excecao ou retorno.
+
+Uso:
+    python socket_sac.py            # fica no ar, escutando
+    python socket_sac.py --checar   # so confirma que o token conecta
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Mapping, Optional
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import card_maria
+import sac_fluxo
+import slack_client
+
+APP_TOKEN_FILE = Path(r"C:\Users\Pichau\slack_app_token.txt")
+_ABRIR = "https://slack.com/api/apps.connections.open"
+
+# Canal para onde vai o caso encaminhado. O botao de supervisor do desenho da
+# Thayna so tem serventia se alguem do outro lado for avisado.
+CANAL_SUPERVISOR = "#sac-supervisao"
+
+PREFIXO = "sac_"
+
+
+def _app_token() -> Optional[str]:
+    tok = (os.environ.get("SLACK_APP_TOKEN") or "").strip()
+    if tok.startswith("xapp-"):
+        return tok
+    try:
+        t = APP_TOKEN_FILE.read_text(encoding="utf-8").strip().splitlines()[0]
+        return t.strip() if t.strip().startswith("xapp-") else None
+    except OSError:
+        return None
+
+
+def resposta_de_ack(envelope_id: str) -> dict:
+    """O que devolvemos ao Slack para ele nao reenviar o mesmo clique."""
+    return {"envelope_id": envelope_id}
+
+
+def nome_de(usuario: Optional[Mapping[str, Any]]) -> str:
+    """Nome de gente, nao ID.
+
+    "U0BH1234" na linha do tempo nao responde "quem marcou isso". A Thayna
+    pediu quem -- e quem e "Maria".
+    """
+    u = usuario or {}
+    perfil = u.get("profile") or {}
+    for chave in (perfil.get("display_name"), perfil.get("real_name"),
+                  u.get("username"), u.get("name"), u.get("id")):
+        if chave:
+            return str(chave)
+    return "alguém"
+
+
+def interpretar(envelope: Optional[Mapping[str, Any]]) -> Optional[dict]:
+    """O clique, achatado no que o resto precisa. None = nao e para nos.
+
+    Outros apps e outros botoes vivem no mesmo canal: reagir a tudo seria
+    avancar caso por clique alheio. Dai o prefixo obrigatorio.
+    """
+    env = envelope or {}
+    payload = env.get("payload") or {}
+    if payload.get("type") != "block_actions":
+        return None
+
+    acoes = payload.get("actions") or []
+    if not acoes:
+        return None
+    acao = acoes[0] or {}
+
+    action_id = str(acao.get("action_id") or "")
+    if not action_id.startswith(PREFIXO):
+        return None
+
+    try:
+        claim_id = int(str(acao.get("value") or "").strip())
+    except (TypeError, ValueError):
+        # value vazio ou lixo viraria marcacao em caso que nao existe.
+        return None
+
+    return {
+        "envelope_id": env.get("envelope_id"),
+        "acao": action_id[len(PREFIXO):],
+        "claim_id": claim_id,
+        "quem": nome_de(payload.get("user")),
+        "channel": (payload.get("channel") or {}).get("id"),
+        "ts": (payload.get("message") or {}).get("ts"),
+        "trigger_id": payload.get("trigger_id"),
+    }
+
+
+def modal_de_observacao(claim_id: int, channel: str, ts: str) -> dict:
+    """A janela de escrever a observacao.
+
+    O `view_submission` volta num envelope separado, sem o card por perto --
+    por isso claim/channel/ts viajam no `private_metadata`. Sem eles a
+    observacao nao sabe onde pousar.
+    """
+    return {
+        "type": "modal",
+        "callback_id": "sac_observacao",
+        "private_metadata": json.dumps(
+            {"claim_id": claim_id, "channel": channel, "ts": ts}),
+        # O Slack recusa title acima de 24 caracteres -- e recusa calado: o
+        # modal simplesmente nao abre.
+        "title": {"type": "plain_text", "text": "Observação"},
+        "submit": {"type": "plain_text", "text": "Salvar"},
+        "close": {"type": "plain_text", "text": "Cancelar"},
+        "blocks": [{
+            "type": "input",
+            "block_id": "obs",
+            "label": {"type": "plain_text", "text": "O que aconteceu?"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "texto",
+                "multiline": True,
+                "placeholder": {"type": "plain_text",
+                                "text": "Ex.: cliente parou de responder"},
+            },
+        }],
+    }
+
+
+def interpretar_modal(envelope: Optional[Mapping[str, Any]]) -> Optional[dict]:
+    """A observacao enviada pelo modal."""
+    env = envelope or {}
+    payload = env.get("payload") or {}
+    if payload.get("type") != "view_submission":
+        return None
+    view = payload.get("view") or {}
+    if view.get("callback_id") != "sac_observacao":
+        return None
+    try:
+        meta = json.loads(view.get("private_metadata") or "{}")
+        claim_id = int(meta["claim_id"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    texto = (((view.get("state") or {}).get("values") or {})
+             .get("obs", {}).get("texto", {}).get("value"))
+    return {
+        "envelope_id": env.get("envelope_id"),
+        "acao": "observacao",
+        "claim_id": claim_id,
+        "quem": nome_de(payload.get("user")),
+        "channel": meta.get("channel"),
+        "ts": meta.get("ts"),
+        "observacao": (texto or "").strip() or None,
+    }
+
+
+# --- I/O -------------------------------------------------------------------
+
+def abrir_conexao() -> str:
+    """Pede ao Slack a URL wss. Levanta alto -- sem ela nao ha o que escutar."""
+    tok = _app_token()
+    if not tok:
+        raise RuntimeError(
+            "token de app ausente. Defina SLACK_APP_TOKEN ou grave o "
+            f"xapp-... em {APP_TOKEN_FILE} (uma linha, sem aspas)."
+        )
+    req = urllib.request.Request(
+        _ABRIR, data=b"", headers={"Authorization": f"Bearer {tok}"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        body = json.loads(r.read())
+    if not body.get("ok"):
+        raise RuntimeError(
+            f"apps.connections.open falhou: {body.get('error')}. "
+            "Confira se o escopo connections:write está no token de app."
+        )
+    return body["url"]
+
+
+def _timeline(conn, claim_id: int) -> list:
+    return card_maria.buscar_timelines(conn, [claim_id]).get(claim_id, [])
+
+
+def _redesenhar(conn, claim_id: int, channel: str, ts: str) -> bool:
+    cur = conn.cursor()
+    cur.execute(card_maria.SQL_CASOS.replace(
+        "AND d.return_destino = 'loja'",
+        "AND d.claim_id = %s"), (claim_id,))
+    linhas = card_maria._linhas(cur)
+    if not linhas:
+        return False
+    caso = linhas[0]
+    blocos = card_maria.blocos_do_card(
+        caso, _timeline(conn, claim_id), datetime.now().date())
+    resumo = (f"Devolução #{card_maria.numero_na_plataforma(caso)} — "
+              f"{(caso.get('item_title') or '')[:60]}")
+    return bool(slack_client.update_message(channel, ts, resumo, blocks=blocos))
+
+
+def aplicar_clique(evento: Mapping[str, Any]) -> str:
+    """Valida, grava e redesenha. Devolve uma linha de log legivel."""
+    from src.db.connection import get_db_connection
+
+    claim_id = evento["claim_id"]
+    acao = evento["acao"]
+    conn = get_db_connection()
+
+    estado = sac_fluxo.estado_de(_timeline(conn, claim_id))
+    try:
+        novo = sac_fluxo.aplicar(estado, acao)
+    except ValueError as e:
+        # Clique fora de ordem (duplo clique, card velho aberto em outra
+        # aba). Avisa quem clicou, em vez de gravar errado calado.
+        slack_client.post_message_full(
+            evento["channel"],
+            f"⚠️ <@{evento.get('user_id') or ''}> {e}",
+            thread_ts=evento.get("ts"))
+        return f"claim {claim_id}: recusado ({e})"
+
+    card_maria.registrar(conn, claim_id, acao, evento.get("quem"),
+                         evento.get("observacao"))
+
+    if acao == "supervisor":
+        cid = slack_client.garantir_canal(CANAL_SUPERVISOR)
+        if cid:
+            link = (f"https://app.slack.com/client//{evento['channel']}"
+                    if evento.get("channel") else "")
+            slack_client.post_message_full(
+                cid,
+                f"🆙 *{evento.get('quem')}* encaminhou o caso `{claim_id}` "
+                f"({sac_fluxo.rotulo_do_estado(estado)}). {link}")
+
+    ok = _redesenhar(conn, claim_id, evento["channel"], evento["ts"])
+    return (f"claim {claim_id}: {acao} → {novo} por {evento.get('quem')}"
+            + ("" if ok else "  [card não redesenhou]"))
+
+
+async def escutar() -> int:
+    from websockets.asyncio.client import connect
+
+    url = abrir_conexao()
+    print(f"conectado — escutando cliques em {card_maria.CANAL}", flush=True)
+
+    async with connect(url, open_timeout=20) as ws:
+        async for cru in ws:
+            try:
+                env = json.loads(cru)
+            except ValueError:
+                continue
+            if env.get("type") == "hello":
+                continue
+
+            # ACK PRIMEIRO. Depois o trabalho. Invertido, o Slack reenvia e a
+            # marcacao entra duas vezes.
+            if env.get("envelope_id"):
+                await ws.send(json.dumps(resposta_de_ack(env["envelope_id"])))
+
+            evento = interpretar(env) or interpretar_modal(env)
+            if not evento:
+                continue
+
+            if evento["acao"] == "observacao" and evento.get("trigger_id"):
+                slack_client._api("views.open", {
+                    "trigger_id": evento["trigger_id"],
+                    "view": modal_de_observacao(
+                        evento["claim_id"], evento["channel"], evento["ts"]),
+                })
+                continue
+
+            try:
+                print(aplicar_clique(evento), flush=True)
+            except Exception as e:
+                # Falhar alto no log, mas sem derrubar o listener: um caso
+                # quebrado nao pode deixar a Maria sem botao nos outros 8.
+                print(f"ERRO no clique {evento}: {e!r}", file=sys.stderr,
+                      flush=True)
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--checar", action="store_true",
+                    help="só confirma que o token de app conecta")
+    args = ap.parse_args()
+
+    if args.checar:
+        url = abrir_conexao()
+        print("token de app OK — o Slack devolveu uma URL wss")
+        return 0 if url.startswith("wss://") else 1
+
+    card_maria.garantir_tabelas()
+    return asyncio.run(escutar())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

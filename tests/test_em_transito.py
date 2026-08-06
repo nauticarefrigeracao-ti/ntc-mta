@@ -183,3 +183,32 @@ def test_resumo_guarda_o_status_do_dinheiro():
     """`retained` = o ML ainda segura o valor. É o que separa 'já perdemos'
     de 'ainda dá para reaver'."""
     assert resumo_do_retorno(RETORNO)["status_money"] == "retained"
+
+
+# --- o número que a tela do vendedor mostra --------------------------------
+#
+# O card publicava `#2000017686941586` (o order_id) enquanto o Meli mostrava
+# `#2000014291726681`. Medido em /orders/2000017686941586: pack_id =
+# 2000014291726681. O link até redirecionava, mas o número lido no Slack não
+# batia com o número lido na plataforma — e essa é justamente a régua.
+
+from em_transito import pack_do_pedido
+
+
+def test_pack_id_e_o_numero_da_tela():
+    assert pack_do_pedido(
+        {"id": 2000017686941586, "pack_id": 2000014291726681}
+    ) == 2000014291726681
+
+
+def test_pedido_sem_pack_nao_inventa():
+    assert pack_do_pedido({"id": 2000017696047312, "pack_id": None}) is None
+
+
+def test_pack_igual_ao_pedido_nao_e_pack():
+    """Guardar isso só duplicaria o dado sem informar nada."""
+    assert pack_do_pedido({"id": 123, "pack_id": 123}) is None
+
+
+def test_payload_vazio_nao_explode():
+    assert pack_do_pedido(None) is None

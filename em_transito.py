@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.request
 from datetime import date, datetime
 from pathlib import Path
@@ -110,6 +111,28 @@ def chega_ate(previsao: Optional[str], hoje: date) -> bool:
     return d is not None and d <= hoje
 
 
+def pack_do_pedido(pedido: Optional[Mapping[str, Any]]) -> Optional[int]:
+    """O numero que a tela do vendedor mostra.
+
+    Venda com mais de um item vive num pack, e e o `pack_id` que aparece como
+    "Venda #..." no Meli. Medido: `/orders/2000017686941586` devolve
+    `pack_id: 2000014291726681` -- e era 2000014291726681 que o chefe via na
+    tela enquanto o Slack dizia 2000017686941586.
+
+    Pack igual ao pedido nao e pack: e o proprio pedido, e guardar isso so
+    duplicaria o dado.
+    """
+    p = pedido or {}
+    pack = p.get("pack_id")
+    if pack is None:
+        return None
+    try:
+        pack, oid = int(pack), int(p.get("id") or 0)
+    except (TypeError, ValueError):
+        return None
+    return None if pack == oid else pack
+
+
 def resumo_do_retorno(payload: Optional[Mapping[str, Any]]) -> dict:
     """Achata o retorno no que o card precisa.
 
@@ -137,18 +160,36 @@ def resumo_do_retorno(payload: Optional[Mapping[str, Any]]) -> dict:
 
 # --- I/O -------------------------------------------------------------------
 
-def _get(url: str, tok: str, novo_formato: bool = False) -> Optional[dict]:
+def _get(url: str, tok: str, novo_formato: bool = False,
+         tentativas: int = 4) -> Optional[dict]:
+    """GET no ML. 403/404 sao respostas legitimas; 429 espera e tenta de novo.
+
+    Buscar pack + retorno + shipment de ~30 casos sao ~90 chamadas em rajada,
+    e o ML devolve 429 no meio. Sem o backoff a coleta morre pela metade --
+    e meia coleta e pior que nenhuma, porque parece completa.
+    """
     cab = {"Authorization": f"Bearer {tok}"}
     if novo_formato:
         cab["x-format-new"] = "true"
-    try:
-        req = urllib.request.Request(url, headers=cab)
-        with urllib.request.urlopen(req, timeout=25) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        if e.code in (403, 404):
-            return None
-        raise
+    espera = 2.0
+    for n in range(tentativas):
+        try:
+            req = urllib.request.Request(url, headers=cab)
+            with urllib.request.urlopen(req, timeout=25) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 404):
+                return None
+            if e.code == 429 and n < tentativas - 1:
+                try:
+                    espera = float((e.headers or {}).get("Retry-After") or espera)
+                except (TypeError, ValueError):
+                    pass
+                time.sleep(espera)
+                espera *= 2
+                continue
+            raise
+    return None
 
 
 def coletar(limite: Optional[int] = None) -> dict:
@@ -174,6 +215,14 @@ def coletar(limite: Optional[int] = None) -> dict:
               "loja": 0, "full": 0, "sem_destino": 0, "falhas": 0}
 
     for claim_id, order_id in casos:
+        # O pack vem primeiro: mesmo caso sem devolucao ainda precisa
+        # imprimir o numero que a Maria ve na tela do Meli.
+        pack = pack_do_pedido(_get(f"{API}/orders/{order_id}", tok))
+        if pack:
+            cur.execute("UPDATE ml_devolucoes SET pack_id = %s WHERE claim_id = %s",
+                        (pack, claim_id))
+            contas["com_pack"] = contas.get("com_pack", 0) + 1
+
         ret = _get(f"{API}/post-purchase/v2/claims/{claim_id}/returns", tok)
         if not ret:
             continue
@@ -222,6 +271,7 @@ _DDL = """
 ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS return_destino TEXT;
 ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS return_transportadora TEXT;
 ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS return_metodo TEXT;
+ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS pack_id BIGINT;
 """
 
 
@@ -249,8 +299,8 @@ def main() -> int:
     print(f"  casos abertos     : {c['casos']}")
     print(f"  com devolução     : {c['com_retorno']}")
     print(f"  com previsão      : {c['com_previsao']}")
-    print(f"  → chegam na LOJA  : {c.get('loja', 0)}   (a Maria recebe)")
-    print(f"  → vão para o FULL : {c.get('full', 0)}   (o ML tria)")
+    print(f"  -> chegam na LOJA  : {c.get('loja', 0)}   (a Maria recebe)")
+    print(f"  -> vao para o FULL : {c.get('full', 0)}   (o ML tria)")
     print(f"  destino desconhec.: {c.get('sem_destino', 0)}")
     if not c["com_previsao"]:
         print("\n  ⚠ nenhuma previsão coletada — sem isso não existe "
