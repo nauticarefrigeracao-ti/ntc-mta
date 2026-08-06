@@ -42,6 +42,7 @@ from typing import Any, Mapping, Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 import card_maria
+import listener_saude
 import sac_fluxo
 import slack_client
 
@@ -397,6 +398,31 @@ async def _uma_conexao(vistos: set, ate: Optional[float]) -> str:
     return "o socket fechou"
 
 
+async def _pulsar(instancia: str) -> None:
+    """Bate um pulso enquanto este processo viver.
+
+    Periodico de proposito, em vez de "avisar quando cair": processo que leva
+    SIGKILL nao avisa nada -- ele so para de bater, e o silencio e o sinal.
+    Sem isto, "a janela e de segundos" continua sendo achismo meu.
+    """
+    from src.db.connection import get_db_connection
+
+    conn = None
+    while True:
+        try:
+            if conn is None:
+                conn = get_db_connection()
+                listener_saude.garantir_tabela(conn)
+            listener_saude.bater(conn, instancia)
+        except Exception as e:
+            # O pulso e instrumentacao: se ele cair, o listener continua
+            # trabalhando. Mas cai FALANDO -- medicao que some calada faz o
+            # relatorio mentir para o lado bom.
+            print(f"[pulso] falhou: {e!r}", file=sys.stderr, flush=True)
+            conn = None
+        await asyncio.sleep(listener_saude.INTERVALO_S)
+
+
 async def escutar(duracao_min: Optional[int] = None) -> int:
     """Fica no ar, reconectando, ate o prazo acabar.
 
@@ -407,6 +433,8 @@ async def escutar(duracao_min: Optional[int] = None) -> int:
     ate = time.monotonic() + duracao_min * 60 if duracao_min else None
     vistos: set = set()
     espera = 1.0
+    pulso = asyncio.create_task(
+        _pulsar(listener_saude.nome_da_instancia()))
 
     while True:
         # O `async for` fica bloqueado esperando clique, entao a checagem de
@@ -416,6 +444,7 @@ async def escutar(duracao_min: Optional[int] = None) -> int:
         restante = (ate - time.monotonic()) if ate else None
         if restante is not None and restante <= 0:
             print("encerrando: prazo do job cumprido", flush=True)
+            pulso.cancel()
             return 0
         try:
             motivo = await asyncio.wait_for(
@@ -423,6 +452,7 @@ async def escutar(duracao_min: Optional[int] = None) -> int:
             espera = 1.0
         except (asyncio.TimeoutError, TimeoutError):
             print("encerrando: prazo do job cumprido", flush=True)
+            pulso.cancel()
             return 0
         except Exception as e:
             motivo = f"caiu: {e!r}"
@@ -432,6 +462,7 @@ async def escutar(duracao_min: Optional[int] = None) -> int:
             print(f"encerrando: {motivo}", flush=True)
             return 0
         if eh_encerramento_limpo(vencido):
+            pulso.cancel()
             return 0
 
         print(f"reconectando em {espera:.0f}s — {motivo}",

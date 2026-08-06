@@ -1,0 +1,177 @@
+"""A janela sem ninguém escutando — medida, não estimada.
+
+Eu escrevi para o Lucas que "hoje a janela é de segundos e só na troca". Não
+tinha medido nada. É exatamente o tipo de frase que a casa proíbe: premissa
+sobre comportamento externo sem evidência.
+
+O que se mede aqui: enquanto vivo, cada listener bate um pulso no banco. Uma
+LACUNA é qualquer intervalo em que NENHUM listener bateu. Isso captura o que
+importa e não depende de o processo conseguir avisar que morreu — processo
+que leva SIGKILL não avisa nada; ele simplesmente para de bater.
+
+Por que a lacuna é cara: o Slack não reenvia interação. Cada segundo sem
+ninguém conectado é um clique que a Maria dá e some — e o que ela vê é
+"Tivemos alguns problemas de conexão", que foi exatamente o que aconteceu no
+ensaio do modal.
+
+A conta tem que somar as batidas de TODAS as instâncias numa linha só. Com
+runs sobrepostos, o listener A morrendo enquanto o B já bate não é lacuna
+nenhuma — e é justamente essa sobreposição que a gente está comprando.
+"""
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from listener_saude import TOLERANCIA_S, disponibilidade, lacunas, resumo
+
+BRT = timezone(timedelta(hours=-3))
+
+
+def t(minuto, segundo=0):
+    return datetime(2026, 8, 6, 10, minuto, segundo, tzinfo=BRT)
+
+
+def batidas(*pares):
+    """(instancia, minuto) -> linhas como o banco devolve."""
+    return [{"instancia": i, "quando": t(m)} for i, m in pares]
+
+
+INICIO, FIM = t(0), t(10)
+
+
+# --- o caso feliz e o caso vazio ------------------------------------------
+
+def test_sem_batida_nenhuma_a_janela_inteira_e_lacuna():
+    """Ninguém escutando o tempo todo. Se isso não aparecer como lacuna, o
+    medidor está mentindo do jeito mais perigoso: para o lado bom."""
+    ls = lacunas([], INICIO, FIM)
+    assert len(ls) == 1
+    assert ls[0]["segundos"] == pytest.approx(600)
+
+
+def test_batidas_continuas_nao_tem_lacuna():
+    b = batidas(*[("A", m) for m in range(11)])
+    assert lacunas(b, INICIO, FIM) == []
+
+
+def test_buraco_no_meio_vira_lacuna_com_duracao():
+    b = batidas(("A", 0), ("A", 1), ("A", 2), ("A", 7), ("A", 8), ("A", 9),
+                ("A", 10))
+    ls = lacunas(b, INICIO, FIM)
+    assert len(ls) == 1
+    assert ls[0]["segundos"] == pytest.approx(300)
+
+
+# --- a tolerância --------------------------------------------------------
+
+def test_intervalo_dentro_da_tolerancia_nao_e_lacuna():
+    """A batida é periódica; um atraso de rede entre dois pulsos não é
+    ausência de listener. Contar isso como queda encheria o relatório de
+    ruído e ninguém olharia o que importa."""
+    seg = TOLERANCIA_S - 1
+    b = [{"instancia": "A", "quando": INICIO},
+         {"instancia": "A", "quando": INICIO + timedelta(seconds=seg)}]
+    assert lacunas(b, INICIO, INICIO + timedelta(seconds=seg)) == []
+
+
+def test_intervalo_acima_da_tolerancia_e_lacuna():
+    seg = TOLERANCIA_S + 30
+    b = [{"instancia": "A", "quando": INICIO},
+         {"instancia": "A", "quando": INICIO + timedelta(seconds=seg)}]
+    ls = lacunas(b, INICIO, INICIO + timedelta(seconds=seg))
+    assert len(ls) == 1
+
+
+def test_tolerancia_e_maior_que_o_intervalo_da_batida():
+    """Se a tolerância fosse menor ou igual ao pulso, TODA batida normal
+    apareceria como lacuna."""
+    from listener_saude import INTERVALO_S
+    assert TOLERANCIA_S > INTERVALO_S
+
+
+# --- a sobreposição é o mecanismo, e a conta tem que enxergar isso --------
+
+def test_dois_listeners_sobrepostos_nao_deixam_lacuna():
+    """A morre no minuto 5, B já batia desde o 4. Cobertura contínua — é
+    exatamente isso que os runs sobrepostos no Actions compram."""
+    b = batidas(("A", 0), ("A", 1), ("A", 2), ("A", 3), ("A", 4), ("A", 5),
+                ("B", 4), ("B", 5), ("B", 6), ("B", 7), ("B", 8), ("B", 9),
+                ("B", 10))
+    assert lacunas(b, INICIO, FIM) == []
+
+
+def test_troca_sem_sobreposicao_deixa_lacuna():
+    """A morre no 3, B só sobe no 7. Quatro minutos de cliques perdidos."""
+    b = batidas(("A", 0), ("A", 1), ("A", 2), ("A", 3),
+                ("B", 7), ("B", 8), ("B", 9), ("B", 10))
+    ls = lacunas(b, INICIO, FIM)
+    assert len(ls) == 1 and ls[0]["segundos"] == pytest.approx(240)
+
+
+def test_batidas_fora_de_ordem_nao_inventam_lacuna():
+    """O banco devolve ordenado, mas depender disso é frágil."""
+    b = batidas(("B", 2), ("A", 0), ("B", 3), ("A", 1), ("A", 4))
+    assert lacunas(b, INICIO, t(4)) == []
+
+
+def test_duas_instancias_no_mesmo_instante_nao_duplicam_nada():
+    b = batidas(("A", 0), ("B", 0), ("A", 1), ("B", 1))
+    assert lacunas(b, INICIO, t(1)) == []
+
+
+# --- as bordas da janela contam -------------------------------------------
+
+def test_lacuna_no_comeco_da_janela_conta():
+    """O relatório de 24h começa antes do primeiro run do dia. Ignorar a
+    borda esconderia justamente a madrugada."""
+    b = batidas(("A", 5), ("A", 6), ("A", 7), ("A", 8), ("A", 9), ("A", 10))
+    ls = lacunas(b, INICIO, FIM)
+    assert len(ls) == 1 and ls[0]["segundos"] == pytest.approx(300)
+
+
+def test_lacuna_no_fim_da_janela_conta():
+    """Listener que morreu e não voltou é o pior caso — e é o que some se a
+    conta parar na última batida."""
+    b = batidas(("A", 0), ("A", 1), ("A", 2))
+    ls = lacunas(b, INICIO, FIM)
+    assert len(ls) == 1 and ls[0]["segundos"] == pytest.approx(480)
+
+
+def test_lacuna_no_comeco_e_no_fim_sao_duas():
+    b = batidas(("A", 4), ("A", 5), ("A", 6))
+    assert len(lacunas(b, INICIO, FIM)) == 2
+
+
+# --- o resumo que vai para o relatório ------------------------------------
+
+def test_resumo_soma_o_tempo_fora_do_ar():
+    b = batidas(("A", 0), ("A", 1), ("A", 6), ("A", 7), ("A", 8), ("A", 9),
+                ("A", 10))
+    r = resumo(lacunas(b, INICIO, FIM), INICIO, FIM)
+    assert r["n"] == 1
+    assert r["total_s"] == pytest.approx(300)
+    assert r["maior_s"] == pytest.approx(300)
+
+
+def test_disponibilidade_e_percentual_do_tempo_coberto():
+    assert disponibilidade(300, 600) == pytest.approx(50.0)
+
+
+def test_disponibilidade_cheia_quando_nao_ha_lacuna():
+    assert disponibilidade(0, 600) == 100.0
+
+
+def test_disponibilidade_nao_arredonda_para_cem():
+    """99,9% e 100% dizem coisas diferentes. Arredondar transforma "caiu uma
+    vez" em "nunca caiu" — e aí ninguém investiga."""
+    d = disponibilidade(1, 86400)
+    assert d < 100.0
+
+
+def test_janela_de_duracao_zero_nao_divide_por_zero():
+    assert disponibilidade(0, 0) == 100.0
+
+
+def test_resumo_sem_lacuna_nenhuma():
+    r = resumo([], INICIO, FIM)
+    assert r["n"] == 0 and r["total_s"] == 0 and r["disponibilidade"] == 100.0
