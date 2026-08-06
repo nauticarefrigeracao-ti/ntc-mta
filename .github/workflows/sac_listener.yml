@@ -1,0 +1,87 @@
+name: Listener do SAC (botoes do card da Maria)
+
+# ONDE O PROCESSO MORA.
+#
+# Os botoes do card so respondem com um processo conectado ao Socket Mode.
+# Ate aqui ele rodava na maquina do Lucas: sumia quando ele desligava, e a
+# Maria via "Tivemos alguns problemas de conexao" ao clicar -- medido no
+# ensaio do modal em 06/08/2026. Em setembro o Lucas sai de ferias; se o
+# listener depender dele, o SAC para junto.
+#
+# POR QUE ACTIONS, E NAO A MAQUINA DA LOJA
+#
+#   Os dois repos sao publicos, entao minuto de Actions nao e cobrado. Os
+#   segredos ja vivem aqui (SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ML_NEON_URL).
+#   Nao entra fornecedor novo, nao entra custo novo, e sobrevive a ferias,
+#   queda de luz na loja e troca de computador.
+#
+# POR QUE SOBREPOSICAO, E NAO UM CRON MAIS APERTADO
+#
+#   Medicao de 03/08/2026 (vigia.py): o GitHub entrega ~1 run a cada ~100 min
+#   por workflow, independente do que se peca. Pedir de 5 em 5 minutos nao
+#   compra nada -- cron e melhor-esforco, e o mais frequente e o mais
+#   despriorizado.
+#
+#   Entao o cron e so a PARTIDA. Cada run fica no ar 5h30 e o cron dispara a
+#   cada 2h: sempre ha run novo subindo antes do anterior sair. O Socket Mode
+#   ACEITA varias conexoes do mesmo app e entrega cada envelope a UMA delas
+#   -- e assim que o proprio Slack faz deploy sem derrubar app. A
+#   sobreposicao aqui nao e desperdicio: e o que garante que nunca exista um
+#   minuto sem ninguem escutando.
+#
+#   Clique duplicado por sobreposicao esta coberto de dois jeitos: o listener
+#   ignora envelope_id ja visto, e uma acao fora de ordem e recusada pela
+#   maquina de estados em vez de gravar errado.
+#
+# O QUE ESTE JOB NAO RESOLVE
+#
+#   Janela entre um run morrer feio e o proximo subir. Nesse intervalo o
+#   clique se PERDE -- o Slack nao reenvia interacao velha. E por isso que o
+#   run sai sozinho no prazo (--minutos) em vez de esperar ser morto: saida
+#   planejada nao deixa clique pela metade.
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      minutos:
+        description: 'Quanto tempo ficar no ar (min)'
+        required: false
+        default: '330'
+
+# Sem cancel-in-progress DE PROPOSITO: a sobreposicao e o mecanismo, nao um
+# efeito colateral. Cancelar o run antigo abriria exatamente o buraco que
+# este workflow existe para fechar.
+concurrency:
+  group: sac-listener-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  escutar:
+    runs-on: ubuntu-latest
+    # 5h30 de trabalho + folga para instalar. O teto do Actions e 6h.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar dependencias
+        run: pip install -q psycopg2-binary websockets
+
+      - name: Conferir o token antes de prometer disponibilidade
+        env:
+          SLACK_APP_TOKEN: ${{ secrets.SLACK_APP_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: python socket_sac.py --checar
+
+      - name: Ficar no ar
+        env:
+          SLACK_APP_TOKEN: ${{ secrets.SLACK_APP_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          ML_NEON_URL: ${{ secrets.ML_NEON_URL }}
+        run: |
+          python socket_sac.py --minutos ${{ github.event.inputs.minutos || 330 }}

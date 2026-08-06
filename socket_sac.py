@@ -32,6 +32,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -218,6 +219,27 @@ def abrir_conexao() -> str:
     return body["url"]
 
 
+def deve_reconectar(envelope: Optional[Mapping[str, Any]]) -> bool:
+    """O Slack pediu para trocar de conexao?
+
+    Socket Mode nao e conexao eterna: o Slack manda `disconnect` (em geral
+    com `reason: refresh_requested`) a cada ~1h e fecha o socket. E o
+    rebalanceamento normal dele, nao um erro -- mas a primeira versao tratava
+    como fim de expediente e o processo saia com SUCESSO. O listener morreria
+    sozinho depois de uma hora, verde no painel, e a Maria veria "problemas
+    de conexao" ao clicar.
+    """
+    return (envelope or {}).get("type") == "disconnect"
+
+
+def eh_encerramento_limpo(prazo_vencido: bool) -> bool:
+    """Socket fechado no fim do prazo do job e saida planejada.
+
+    No meio do expediente, e queda -- e queda se reconecta.
+    """
+    return bool(prazo_vencido)
+
+
 def avisar_quem_clicou(evento: Mapping[str, Any], texto: str) -> bool:
     """Mensagem efemera: so quem clicou ve, e ela some sozinha.
 
@@ -316,7 +338,8 @@ def aplicar_clique(evento: Mapping[str, Any]) -> str:
             + ("" if ok else "  [card não redesenhou]"))
 
 
-async def escutar() -> int:
+async def _uma_conexao(vistos: set, ate: Optional[float]) -> str:
+    """Uma sessao de Socket Mode. Devolve por que ela terminou."""
     from websockets.asyncio.client import connect
 
     url = abrir_conexao()
@@ -328,13 +351,26 @@ async def escutar() -> int:
                 env = json.loads(cru)
             except ValueError:
                 continue
+
+            if deve_reconectar(env):
+                return f"o Slack pediu troca de conexão ({env.get('reason')})"
             if env.get("type") == "hello":
                 continue
 
-            # ACK PRIMEIRO. Depois o trabalho. Invertido, o Slack reenvia e a
-            # marcacao entra duas vezes.
-            if env.get("envelope_id"):
-                await ws.send(json.dumps(resposta_de_ack(env["envelope_id"])))
+            # ACK PRIMEIRO. Depois o trabalho. Invertido, o Slack considera o
+            # clique perdido e reenvia -- e a marcacao entra duas vezes.
+            eid = env.get("envelope_id")
+            if eid:
+                await ws.send(json.dumps(resposta_de_ack(eid)))
+
+            # Reentrega, ou dois listeners em sobreposicao (que e como se
+            # consegue cobertura continua no Actions): o mesmo envelope pode
+            # chegar de novo. Anotar duas vezes duplicaria a observacao na
+            # linha do tempo, porque anotar e sempre acao valida.
+            if eid and eid in vistos:
+                continue
+            if eid:
+                vistos.add(eid)
 
             evento = interpretar(env) or interpretar_modal(env)
             if not evento:
@@ -352,16 +388,68 @@ async def escutar() -> int:
                 print(aplicar_clique(evento), flush=True)
             except Exception as e:
                 # Falhar alto no log, mas sem derrubar o listener: um caso
-                # quebrado nao pode deixar a Maria sem botao nos outros 8.
+                # quebrado nao pode deixar a Maria sem botao nos outros oito.
                 print(f"ERRO no clique {evento}: {e!r}", file=sys.stderr,
                       flush=True)
-    return 0
+
+            if ate and time.monotonic() >= ate:
+                return "prazo do job cumprido"
+    return "o socket fechou"
+
+
+async def escutar(duracao_min: Optional[int] = None) -> int:
+    """Fica no ar, reconectando, ate o prazo acabar.
+
+    `duracao_min` existe para o GitHub Actions: o job tem teto de 6h, e sair
+    sozinho antes disso e mais limpo do que ser morto no meio de um clique.
+    Sem prazo, roda ate alguem parar.
+    """
+    ate = time.monotonic() + duracao_min * 60 if duracao_min else None
+    vistos: set = set()
+    espera = 1.0
+
+    while True:
+        # O `async for` fica bloqueado esperando clique, entao a checagem de
+        # prazo la dentro so acontecia QUANDO alguem clicava. Num dia parado
+        # o job ia ate o Actions matar -- o oposto de sair planejado. O
+        # relogio tem que correr por fora, independente de haver trafego.
+        restante = (ate - time.monotonic()) if ate else None
+        if restante is not None and restante <= 0:
+            print("encerrando: prazo do job cumprido", flush=True)
+            return 0
+        try:
+            motivo = await asyncio.wait_for(
+                _uma_conexao(vistos, ate), timeout=restante)
+            espera = 1.0
+        except (asyncio.TimeoutError, TimeoutError):
+            print("encerrando: prazo do job cumprido", flush=True)
+            return 0
+        except Exception as e:
+            motivo = f"caiu: {e!r}"
+
+        vencido = bool(ate and time.monotonic() >= ate)
+        if vencido:
+            print(f"encerrando: {motivo}", flush=True)
+            return 0
+        if eh_encerramento_limpo(vencido):
+            return 0
+
+        print(f"reconectando em {espera:.0f}s — {motivo}",
+              file=sys.stderr, flush=True)
+        await asyncio.sleep(espera)
+        # Teto baixo de propósito: minuto sem listener é clique perdido na
+        # cara da Maria, não linha a mais no log.
+        espera = min(espera * 2, 30.0)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--checar", action="store_true",
                     help="só confirma que o token de app conecta")
+    ap.add_argument("--minutos", type=int,
+                    help="sai sozinho depois de N minutos (o job do Actions "
+                         "tem teto de 6h; sair antes é mais limpo que ser "
+                         "morto no meio de um clique)")
     args = ap.parse_args()
 
     if args.checar:
@@ -370,7 +458,7 @@ def main() -> int:
         return 0 if url.startswith("wss://") else 1
 
     card_maria.garantir_tabelas()
-    return asyncio.run(escutar())
+    return asyncio.run(escutar(args.minutos))
 
 
 if __name__ == "__main__":

@@ -212,3 +212,51 @@ def test_sem_usuario_nao_inventa_id():
     e = dict(envelope_de_clique())
     e["payload"] = dict(e["payload"]); e["payload"].pop("user")
     assert interpretar(e)["user_id"] is None
+
+
+# --- o listener tem que sobreviver ao próprio Slack ------------------------
+#
+# O Socket Mode não é uma conexão eterna: o Slack manda `disconnect` com
+# `reason: refresh_requested` a cada ~1h e fecha o socket. É o mecanismo
+# normal de rebalanceamento dele, não um erro.
+#
+# A primeira versão tratava isso como fim: o `async for` acabava, `escutar()`
+# retornava 0 e o processo saía com SUCESSO. O listener morreria sozinho
+# depois de uma hora, sem ninguém desligar nada, e o job ficaria VERDE no
+# painel — que é o pior jeito de morrer. A Maria clicaria e veria "problemas
+# de conexão", igual ao que aconteceu no ensaio do modal.
+
+from socket_sac import deve_reconectar, eh_encerramento_limpo
+
+
+def test_disconnect_do_slack_pede_reconexao():
+    assert deve_reconectar({"type": "disconnect",
+                            "reason": "refresh_requested"})
+
+
+def test_disconnect_por_warning_tambem_reconecta():
+    assert deve_reconectar({"type": "disconnect", "reason": "link_disabled"})
+
+
+def test_evento_normal_nao_pede_reconexao():
+    assert not deve_reconectar({"type": "events_api"})
+    assert not deve_reconectar({"type": "hello"})
+
+
+def test_socket_fechado_e_encerramento_limpo_so_no_fim_do_prazo():
+    """Fim do prazo do job é saída planejada. Queda no meio é reconexão."""
+    assert eh_encerramento_limpo(prazo_vencido=True)
+    assert not eh_encerramento_limpo(prazo_vencido=False)
+
+
+# --- envelope repetido não vira marcação repetida --------------------------
+#
+# O Slack reentrega envelope não confirmado, e com dois listeners rodando em
+# sobreposição (que é como se consegue cobertura contínua no Actions) a mesma
+# devolução pode chegar duas vezes. Sem chave, a linha do tempo da Thayná
+# ganharia "Recebi o produto" duplicado — e uma observação apareceria duas
+# vezes, porque anotar é sempre uma ação válida.
+
+def test_envelope_id_viaja_com_o_evento():
+    assert interpretar(envelope_de_clique(envelope_id="env-42"))[
+        "envelope_id"] == "env-42"
