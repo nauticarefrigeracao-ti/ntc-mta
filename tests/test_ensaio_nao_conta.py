@@ -127,3 +127,24 @@ def caso_ml():
         "return_tracking_number": None, "return_transportadora": None,
         "date_created": "2026-08-03T10:00:00-03:00",
     }
+
+
+# --- o selo tem que sobreviver ao caminho real do listener -----------------
+#
+# Verificado lendo a mensagem publicada (06/08/2026): o cofrinho do
+# #sac-teste saiu SEM selo, mostrando "seguramos R$ 2.131,33".
+#
+# Causa: liguei o selo comparando o NOME do canal (`canal != "#sac"`), mas o
+# listener chama `publicar(channel_id=...)` sem passar nome — então `canal`
+# ficava no default "#sac" e a comparação nunca dava verdadeira. O teste
+# anterior passava porque chamava `blocos_do_cofrinho(ensaio=True)` direto,
+# pulando exatamente o trecho quebrado.
+
+def test_selo_e_decidido_pelo_id_do_canal_nao_pelo_nome():
+    assert cofrinho.eh_ensaio(ENSAIO, OFICIAL) is True
+    assert cofrinho.eh_ensaio(OFICIAL, OFICIAL) is False
+
+
+def test_sem_saber_o_oficial_nao_chuta_que_e_ensaio():
+    """Marcar tudo como ensaio esconderia o placar de verdade."""
+    assert cofrinho.eh_ensaio(ENSAIO, None) is False

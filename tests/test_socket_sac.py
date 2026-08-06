@@ -191,3 +191,24 @@ def test_finalizar_nao_conta_de_novo():
     """O dinheiro já foi contado em recusado/reembolsado. Contar no
     "finalizar" dobraria o caso no placar do mês."""
     assert not deve_atualizar_cofrinho("finalizar")
+
+
+# --- quem clicou, para avisar só a essa pessoa -----------------------------
+#
+# Verificado na thread do card após o QA: sete avisos "⚠️ <@> 'recebi' não é
+# uma ação possível" — menção vazia, porque `aplicar_clique` lia
+# `evento["user_id"]` que `interpretar` nunca preencheu.
+#
+# Dois defeitos num: a menção não menciona ninguém, e o aviso vira mensagem
+# pública na thread. Recusa de clique é assunto de quem clicou; publicar para
+# o canal inteiro transforma um deslize em constrangimento, e enche a thread
+# do card de ruído que a Maria vai ter que rolar.
+
+def test_interpretar_traz_o_id_de_quem_clicou():
+    assert interpretar(envelope_de_clique())["user_id"] == "U0BH1"
+
+
+def test_sem_usuario_nao_inventa_id():
+    e = dict(envelope_de_clique())
+    e["payload"] = dict(e["payload"]); e["payload"].pop("user")
+    assert interpretar(e)["user_id"] is None

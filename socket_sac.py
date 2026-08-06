@@ -116,6 +116,9 @@ def interpretar(envelope: Optional[Mapping[str, Any]]) -> Optional[dict]:
         "acao": action_id[len(PREFIXO):],
         "claim_id": claim_id,
         "quem": nome_de(payload.get("user")),
+        # O ID serve para avisar SO quem clicou quando o clique e recusado.
+        # Sem ele, a mensagem saia com "<@>" -- uma mencao a ninguem.
+        "user_id": (payload.get("user") or {}).get("id"),
         "channel": (payload.get("channel") or {}).get("id"),
         "ts": (payload.get("message") or {}).get("ts"),
         "trigger_id": payload.get("trigger_id"),
@@ -215,6 +218,24 @@ def abrir_conexao() -> str:
     return body["url"]
 
 
+def avisar_quem_clicou(evento: Mapping[str, Any], texto: str) -> bool:
+    """Mensagem efemera: so quem clicou ve, e ela some sozinha.
+
+    Sem `user_id` nao da para mandar efemera. Ai o recado vai para a thread
+    do card -- feio, mas silencio seria pior: a pessoa clicaria de novo sem
+    entender por que nada aconteceu.
+    """
+    uid = evento.get("user_id")
+    if uid:
+        r = slack_client._api("chat.postEphemeral", {
+            "channel": evento["channel"], "user": uid, "text": texto})
+        if r and r.get("ok"):
+            return True
+    slack_client.post_message_full(evento["channel"], texto,
+                                   thread_ts=evento.get("ts"))
+    return False
+
+
 def _timeline(conn, claim_id: int, canal: str) -> list:
     """So as marcacoes deste canal -- treino no #sac-teste nao mexe no #sac."""
     return card_maria.buscar_timelines(
@@ -251,12 +272,14 @@ def aplicar_clique(evento: Mapping[str, Any]) -> str:
     try:
         novo = sac_fluxo.aplicar(estado, acao)
     except ValueError as e:
-        # Clique fora de ordem (duplo clique, card velho aberto em outra
-        # aba). Avisa quem clicou, em vez de gravar errado calado.
-        slack_client.post_message_full(
-            evento["channel"],
-            f"⚠️ <@{evento.get('user_id') or ''}> {e}",
-            thread_ts=evento.get("ts"))
+        # Clique fora de ordem: duplo clique, ou card velho aberto em outra
+        # aba desde de manha. Avisa QUEM CLICOU -- e so ele.
+        #
+        # A primeira versao respondia na thread do card. Duas consequencias
+        # ruins, as duas vistas no QA: a thread encheu de sete avisos que a
+        # Maria teria que rolar, e um deslize de dedo virava recado publico.
+        # Efemera resolve as duas: aparece so para quem clicou e some sozinha.
+        avisar_quem_clicou(evento, f"⚠️ {e}")
         return f"claim {claim_id}: recusado ({e})"
 
     card_maria.registrar(conn, claim_id, acao, evento.get("quem"),

@@ -157,6 +157,20 @@ def acumular(casos: Iterable[Mapping[str, Any]], ano: int, mes: int,
     return r
 
 
+def eh_ensaio(cid: Optional[str], oficial: Optional[str]) -> bool:
+    """Este canal e de treino?
+
+    Compara IDS, nao nomes. A primeira versao comparava o NOME do canal, mas
+    o listener chama `publicar(channel_id=...)` sem passar nome -- entao o
+    nome ficava no default "#sac" e a comparacao nunca dava verdadeira. O
+    cofrinho do #sac-teste saiu sem selo mostrando "seguramos R$ 2.131,33".
+
+    Sem saber qual e o oficial, NAO chuta ensaio: marcar tudo como treino
+    esconderia o placar de verdade.
+    """
+    return bool(cid and oficial and cid != oficial)
+
+
 def _mes_por_extenso(d: date) -> str:
     nomes = ("janeiro", "fevereiro", "março", "abril", "maio", "junho",
              "julho", "agosto", "setembro", "outubro", "novembro", "dezembro")
@@ -301,11 +315,12 @@ def publicar(canal: str = CANAL, dry_run: bool = False,
     # O placar so conta o que foi clicado no canal OFICIAL. Treino e
     # conferencia no #sac-teste ficam de fora -- essa era a pergunta certa
     # do Lucas antes de clicar: "e se o produto nao tiver chegado?".
-    oficial = channel_id or slack_client.garantir_canal(CANAL)
+    canal_oficial = slack_client.garantir_canal(CANAL)
+    oficial = channel_id or canal_oficial
     resumo = acumular(carregar(conn, hoje.year, hoje.month),
                       hoje.year, hoje.month, canal_oficial=oficial)
     blocos = blocos_do_cofrinho(resumo, hoje,
-                                ensaio=bool(channel_id) and canal != CANAL)
+                                ensaio=eh_ensaio(oficial, canal_oficial))
 
     if dry_run:
         for b in blocos:

@@ -242,6 +242,37 @@ def rodar_caminho(claim_id: int, channel: str, ts: str,
             "falhas": falhas}
 
 
+def limpar_thread(channel_id: str, ts: str) -> int:
+    """Apaga as respostas que o ensaio deixou na thread do card.
+
+    O QA clica de proposito fora de ordem, e cada recusa deixava um recado na
+    thread -- sete deles no primeiro card. Limpar faz parte de ensaiar: se o
+    canal de treino acumula lixo, ninguem consegue usar o canal de treino.
+    """
+    r = slack_client._api("conversations.replies",
+                          {"channel": channel_id, "ts": ts, "limit": 200},
+                          get=True)
+    apagadas = 0
+    for m in ((r or {}).get("messages") or [])[1:]:
+        if slack_client._api("chat.delete",
+                             {"channel": channel_id, "ts": m.get("ts")}):
+            apagadas += 1
+        time.sleep(0.35)
+    return apagadas
+
+
+def faxina(cid: str, cards: list) -> str:
+    """Devolve o canal de ensaio ao estado limpo."""
+    marcas = sum(limpar_ensaio(c, cid) for c, _ in cards)
+    fios = sum(limpar_thread(cid, ts) for _, ts in cards)
+    card_maria.publicar(canal=CANAL_PADRAO)
+    # Sem isto o placar de treino congela no ultimo numero do ensaio -- e um
+    # print de "seguramos R$ 2.131,33" continua no canal para sempre.
+    cofrinho.publicar(channel_id=cid)
+    return (f"{marcas} marcação(ões), {fios} resposta(s) de thread, "
+            f"cards e cofrinho restaurados")
+
+
 def rodar_caos(claim_id: int, channel: str, ts: str) -> dict:
     """O que os 12 caminhos NAO cobrem.
 
@@ -293,6 +324,8 @@ def rodar_caos(claim_id: int, channel: str, ts: str) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--canal", default=CANAL_PADRAO)
+    ap.add_argument("--so-limpar", action="store_true",
+                    help="apenas devolve o canal de ensaio ao estado limpo")
     ap.add_argument("--manter", action="store_true",
                     help="não limpa as marcações no fim")
     args = ap.parse_args()
@@ -320,6 +353,10 @@ def main() -> int:
               f"`python card_maria.py --publicar --canal {args.canal}` antes.",
               file=sys.stderr)
         return 1
+
+    if args.so_limpar:
+        print(f"limpeza: {faxina(cid, cards)}")
+        return 0
 
     todos = caminhos()
     print(f"QA do fluxo em {args.canal} — {len(todos)} caminhos, "
@@ -355,10 +392,7 @@ def main() -> int:
           f"negativo(s)")
 
     if not args.manter:
-        apagadas = sum(limpar_ensaio(c, cid) for c, _ in cards)
-        card_maria.publicar(canal=args.canal)
-        print(f"  limpeza: {apagadas} marcação(ões) de ensaio apagadas, "
-              f"cards restaurados")
+        print(f"  limpeza: {faxina(cid, cards)}")
 
     com_falha = [r for r in relatorios if r["falhas"]]
     print(f"\n{len(relatorios) - len(com_falha)}/{len(relatorios)} caminhos "
