@@ -154,6 +154,18 @@ def modal_de_observacao(claim_id: int, channel: str, ts: str) -> dict:
     }
 
 
+def deve_atualizar_cofrinho(acao: str) -> bool:
+    """So o desfecho mexe no placar.
+
+    Redesenhar o cofrinho a cada "recebi" seria uma chamada ao Slack por
+    clique sem nada mudar no numero -- e o rate limit de app nao-Marketplace
+    e de 1 requisicao por minuto por metodo.
+    """
+    import cofrinho
+
+    return acao in cofrinho.DESFECHOS
+
+
 def interpretar_modal(envelope: Optional[Mapping[str, Any]]) -> Optional[dict]:
     """A observacao enviada pelo modal."""
     env = envelope or {}
@@ -257,6 +269,14 @@ def aplicar_clique(evento: Mapping[str, Any]) -> str:
                 f"({sac_fluxo.rotulo_do_estado(estado)}). {link}")
 
     ok = _redesenhar(conn, claim_id, evento["channel"], evento["ts"])
+
+    if deve_atualizar_cofrinho(acao):
+        # O placar tem que mexer no instante do clique. Se so atualizasse no
+        # job da noite, a Maria fecharia um caso e nao veria nada acontecer --
+        # e um cofrinho que nao reage nao e um cofrinho.
+        import cofrinho
+        cofrinho.publicar(canal=card_maria.CANAL)
+
     return (f"claim {claim_id}: {acao} → {novo} por {evento.get('quem')}"
             + ("" if ok else "  [card não redesenhou]"))
 

@@ -158,3 +158,36 @@ def test_modal_tem_titulo_curto():
     m = modal_de_observacao(1, "C1", "1.1")
     assert len(m["title"]["text"]) <= 24
     assert len(m["submit"]["text"]) <= 24
+
+
+# --- o cofrinho reage ao desfecho, e só a ele ------------------------------
+#
+# Redesenhar o placar a cada "recebi" seria uma chamada ao Slack por clique
+# sem nada mudar no número — e o rate limit de app não-Marketplace é de 1
+# requisição por minuto por método. Mas um cofrinho que não mexe quando a
+# Maria fecha o caso também não é um cofrinho: ela clica e não vê nada
+# acontecer.
+
+from socket_sac import deve_atualizar_cofrinho
+
+
+def test_recusado_mexe_no_placar():
+    assert deve_atualizar_cofrinho("recusado")
+
+
+def test_reembolsado_mexe_no_placar():
+    assert deve_atualizar_cofrinho("reembolsado")
+
+
+def test_receber_nao_mexe_no_placar():
+    assert not deve_atualizar_cofrinho("recebi")
+
+
+def test_observacao_nao_mexe_no_placar():
+    assert not deve_atualizar_cofrinho("observacao")
+
+
+def test_finalizar_nao_conta_de_novo():
+    """O dinheiro já foi contado em recusado/reembolsado. Contar no
+    "finalizar" dobraria o caso no placar do mês."""
+    assert not deve_atualizar_cofrinho("finalizar")
