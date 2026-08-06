@@ -147,8 +147,14 @@ def _sec(txt: str, acessorio: Optional[dict] = None) -> dict:
 
 def blocos_do_card(caso: Mapping[str, Any],
                    timeline: list,
-                   hoje: date) -> list[dict]:
-    """O card de UM caso: identificacao, situacao, historico e os botoes."""
+                   hoje: date,
+                   ensaio: bool = False) -> list[dict]:
+    """O card de UM caso: identificacao, situacao, historico e os botoes.
+
+    `ensaio` marca o card publicado fora do canal oficial -- treinamento ou
+    conferencia. Sem o selo, alguem abre o #sac-teste, ve um caso "Recusado"
+    e leva o numero para uma reuniao.
+    """
     num = numero_na_plataforma(caso)
     claim = caso.get("claim_id")
     titulo = (caso.get("item_title") or "Produto").strip()
@@ -171,7 +177,13 @@ def blocos_do_card(caso: Mapping[str, Any],
     acessorio = ({"type": "image", "image_url": foto, "alt_text": titulo[:60]}
                  if foto else None)
 
-    blocos: list[dict] = [_sec(cabeca, acessorio)]
+    blocos: list[dict] = []
+    if ensaio:
+        blocos.append({"type": "context", "elements": [{
+            "type": "mrkdwn",
+            "text": "🧪 *ENSAIO* — canal de treino. O que for clicado aqui "
+                    "*não conta* no cofrinho nem no balanço."}]})
+    blocos.append(_sec(cabeca, acessorio))
 
     linha = situacao_do_envio(caso, hoje)
     rastreio = caso.get("return_tracking_number")
@@ -229,11 +241,28 @@ CREATE INDEX IF NOT EXISTS ix_sac_timeline_claim
     ON sac_timeline (claim_id, quando);
 
 CREATE TABLE IF NOT EXISTS sac_cards (
-    claim_id    BIGINT PRIMARY KEY,
+    claim_id    BIGINT NOT NULL,
     channel_id  TEXT NOT NULL,
     ts          TEXT NOT NULL,
     atualizado  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Em que canal a marcacao nasceu. O card do #sac-teste aponta para o MESMO
+-- claim real do #sac; sem esta coluna, um clique de treino vira dinheiro no
+-- cofrinho do mes.
+ALTER TABLE sac_timeline ADD COLUMN IF NOT EXISTS channel_id TEXT;
+
+-- O mesmo caso pode ter um card no #sac e outro no #sac-teste, e sao
+-- mensagens diferentes. Com a chave so no claim, o segundo publish
+-- sobrescreveria o `ts` do primeiro e orfanaria a mensagem la.
+ALTER TABLE sac_cards DROP CONSTRAINT IF EXISTS sac_cards_pkey;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                   WHERE conname = 'sac_cards_claim_canal') THEN
+        ALTER TABLE sac_cards ADD CONSTRAINT sac_cards_claim_canal
+              PRIMARY KEY (claim_id, channel_id);
+    END IF;
+END $$;
 
 ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS pack_id BIGINT;
 """
@@ -277,14 +306,23 @@ def buscar_casos(conn) -> list[dict]:
     return _linhas(cur)
 
 
-def buscar_timelines(conn, claims: list) -> dict:
+def buscar_timelines(conn, claims: list,
+                     channel_id: Optional[str] = None) -> dict:
+    """As marcacoes por claim. Com `channel_id`, so as nascidas nesse canal.
+
+    O card do #sac-teste avanca com os cliques do #sac-teste; o do #sac, com
+    os do #sac. Misturar faria o treino da Maria mexer na tela de producao.
+    """
     if not claims:
         return {}
     cur = conn.cursor()
     cur.execute("""
-        SELECT claim_id, etapa, quem, quando, observacao
-        FROM sac_timeline WHERE claim_id = ANY(%s) ORDER BY quando, id
-    """, (list(claims),))
+        SELECT claim_id, etapa, quem, quando, observacao, channel_id
+        FROM sac_timeline
+        WHERE claim_id = ANY(%s)
+          AND (%s::text IS NULL OR channel_id = %s)
+        ORDER BY quando, id
+    """, (list(claims), channel_id, channel_id))
     saida: dict = {}
     for r in _linhas(cur):
         saida.setdefault(r["claim_id"], []).append(r)
@@ -292,14 +330,28 @@ def buscar_timelines(conn, claims: list) -> dict:
 
 
 def registrar(conn, claim_id: int, etapa: str, quem: Optional[str],
+              channel_id: Optional[str] = None,
               observacao: Optional[str] = None) -> None:
-    """Grava a marcacao. NAO valida aqui: quem valida e `sac_fluxo.aplicar`,
-    antes de chamar -- assim a regra mora num lugar so."""
+    """Grava a marcacao.
+
+    A regra do fluxo NAO e validada aqui -- quem valida e `sac_fluxo.aplicar`,
+    antes de chamar, para a regra morar num lugar so.
+
+    O `channel_id` e obrigatorio e falha alto quando falta: sem ele nao da
+    para saber se a marcacao e dinheiro de verdade ou clique de treino, e
+    assumir "oficial" seria escolher o pior dos dois erros, calado.
+    """
+    if not channel_id:
+        raise ValueError(
+            f"marcação '{etapa}' do claim {claim_id} chegou sem canal. "
+            "Sem canal não dá para separar dinheiro de ensaio."
+        )
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO sac_timeline (claim_id, etapa, quem, observacao)
-            VALUES (%s, %s, %s, %s)
-        """, (claim_id, etapa, quem, observacao))
+            INSERT INTO sac_timeline
+                   (claim_id, etapa, quem, channel_id, observacao)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (claim_id, etapa, quem, channel_id, observacao))
     conn.commit()
 
 
@@ -312,9 +364,9 @@ def publicar(canal: str = CANAL, dry_run: bool = False) -> int:
     conn = get_db_connection()
     casos = buscar_casos(conn)
     ativos, parados = separar_parados(casos, hoje)
-    timelines = buscar_timelines(conn, [c["claim_id"] for c in ativos])
 
     if dry_run:
+        timelines = buscar_timelines(conn, [c["claim_id"] for c in ativos])
         for c in ativos:
             print(f"--- #{numero_na_plataforma(c)} claim {c['claim_id']}")
             for b in blocos_do_card(c, timelines.get(c["claim_id"], []), hoje):
@@ -337,6 +389,11 @@ def publicar(canal: str = CANAL, dry_run: bool = False) -> int:
         print(f"não consegui abrir {canal}", file=sys.stderr)
         return 1
 
+    # O card avanca com os cliques do PROPRIO canal, e se identifica como
+    # ensaio quando nao esta no canal oficial.
+    ensaio = canal != CANAL
+    timelines = buscar_timelines(conn, [c["claim_id"] for c in ativos], cid)
+
     cur = conn.cursor()
     cur.execute("SELECT claim_id, ts FROM sac_cards WHERE channel_id = %s",
                 (cid,))
@@ -345,7 +402,7 @@ def publicar(canal: str = CANAL, dry_run: bool = False) -> int:
     novos = atualizados = falhas = 0
     for c in ativos:
         claim = c["claim_id"]
-        blocos = blocos_do_card(c, timelines.get(claim, []), hoje)
+        blocos = blocos_do_card(c, timelines.get(claim, []), hoje, ensaio)
         resumo = (f"Devolução #{numero_na_plataforma(c)} — "
                   f"{(c.get('item_title') or '')[:60]}")
         if claim in ja:
@@ -363,9 +420,8 @@ def publicar(canal: str = CANAL, dry_run: bool = False) -> int:
             c2.execute("""
                 INSERT INTO sac_cards (claim_id, channel_id, ts)
                 VALUES (%s, %s, %s)
-                ON CONFLICT (claim_id) DO UPDATE
-                  SET ts = EXCLUDED.ts, channel_id = EXCLUDED.channel_id,
-                      atualizado = now()
+                ON CONFLICT (claim_id, channel_id) DO UPDATE
+                  SET ts = EXCLUDED.ts, atualizado = now()
             """, (claim, cid, r["ts"]))
         conn.commit()
         novos += 1

@@ -21,10 +21,17 @@ calado: viraria numero errado no cofrinho e no balanco do mes.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional
 
 ESTADO_INICIAL = "a_caminho"
+
+# O relogio da Maria. O banco grava TIMESTAMPTZ e devolve UTC: no primeiro
+# clique real, 15:02 de Praia Grande virou "18:02" no card. Nao e cosmetico
+# -- perto da meia-noite, 21h30 vira 00h30 do dia seguinte e a marcacao muda
+# de DIA. O Brasil nao tem horario de verao desde 2019, entao o offset fixo e
+# exato e nao depende do tzdata da maquina.
+BRT = timezone(timedelta(hours=-3))
 
 # Nao movem o caso de degrau -- anotar nao e decidir, e pedir ajuda tambem
 # nao. Se avancassem, a Maria perderia o degrau so por escrever um bilhete.
@@ -104,6 +111,14 @@ _ETAPAS = {
 _COFRINHO = {"reembolsado": "negativo", "recusado": "positivo"}
 
 
+# Superficie publica do grafo -- e o que permite varrer TODOS os caminhos e
+# TODAS as combinacoes estado x acao sem um teste ter que adivinhar a lista.
+ESTADOS = tuple(_ESCADA)
+ACOES = tuple(sorted(
+    {nome for degraus in _ESCADA.values() for nome, _d, _r, _e in degraus}
+    | set(NEUTRAS)))
+
+
 def eh_terminal(estado: str) -> bool:
     return estado == "finalizado"
 
@@ -176,14 +191,21 @@ def cofrinho(timeline: Iterable[Mapping[str, Any]]) -> Optional[str]:
 
 
 def _quando(texto: Any) -> Optional[datetime]:
+    """O carimbo no fuso de quem clicou.
+
+    Com fuso, converte para BRT. Sem fuso, ja e hora local -- converter de
+    novo empurraria tres horas para frente.
+    """
     if isinstance(texto, datetime):
-        return texto
-    if not texto:
-        return None
-    try:
-        return datetime.fromisoformat(str(texto).replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
+        d = texto
+    else:
+        if not texto:
+            return None
+        try:
+            d = datetime.fromisoformat(str(texto).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+    return d.astimezone(BRT) if d.tzinfo else d
 
 
 def linha_da_timeline(evento: Mapping[str, Any]) -> str:

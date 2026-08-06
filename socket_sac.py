@@ -215,8 +215,10 @@ def abrir_conexao() -> str:
     return body["url"]
 
 
-def _timeline(conn, claim_id: int) -> list:
-    return card_maria.buscar_timelines(conn, [claim_id]).get(claim_id, [])
+def _timeline(conn, claim_id: int, canal: str) -> list:
+    """So as marcacoes deste canal -- treino no #sac-teste nao mexe no #sac."""
+    return card_maria.buscar_timelines(
+        conn, [claim_id], canal).get(claim_id, [])
 
 
 def _redesenhar(conn, claim_id: int, channel: str, ts: str) -> bool:
@@ -228,8 +230,10 @@ def _redesenhar(conn, claim_id: int, channel: str, ts: str) -> bool:
     if not linhas:
         return False
     caso = linhas[0]
+    oficial = slack_client.garantir_canal(card_maria.CANAL)
     blocos = card_maria.blocos_do_card(
-        caso, _timeline(conn, claim_id), datetime.now().date())
+        caso, _timeline(conn, claim_id, channel), datetime.now().date(),
+        ensaio=channel != oficial)
     resumo = (f"Devolução #{card_maria.numero_na_plataforma(caso)} — "
               f"{(caso.get('item_title') or '')[:60]}")
     return bool(slack_client.update_message(channel, ts, resumo, blocks=blocos))
@@ -243,7 +247,7 @@ def aplicar_clique(evento: Mapping[str, Any]) -> str:
     acao = evento["acao"]
     conn = get_db_connection()
 
-    estado = sac_fluxo.estado_de(_timeline(conn, claim_id))
+    estado = sac_fluxo.estado_de(_timeline(conn, claim_id, evento["channel"]))
     try:
         novo = sac_fluxo.aplicar(estado, acao)
     except ValueError as e:
@@ -256,17 +260,23 @@ def aplicar_clique(evento: Mapping[str, Any]) -> str:
         return f"claim {claim_id}: recusado ({e})"
 
     card_maria.registrar(conn, claim_id, acao, evento.get("quem"),
-                         evento.get("observacao"))
+                         channel_id=evento["channel"],
+                         observacao=evento.get("observacao"))
 
     if acao == "supervisor":
-        cid = slack_client.garantir_canal(CANAL_SUPERVISOR)
-        if cid:
-            link = (f"https://app.slack.com/client//{evento['channel']}"
-                    if evento.get("channel") else "")
+        aviso = (f"🆙 *{evento.get('quem')}* encaminhou o caso `{claim_id}` "
+                 f"({sac_fluxo.rotulo_do_estado(estado)}).")
+        if evento["channel"] == slack_client.garantir_canal(card_maria.CANAL):
+            cid = slack_client.garantir_canal(CANAL_SUPERVISOR)
+            if cid:
+                slack_client.post_message_full(cid, aviso)
+        else:
+            # Treino nao acorda supervisor. O aviso fica na thread do proprio
+            # card, para a Maria ver que o botao respondeu -- sem ninguem do
+            # outro lado receber chamado de mentira.
             slack_client.post_message_full(
-                cid,
-                f"🆙 *{evento.get('quem')}* encaminhou o caso `{claim_id}` "
-                f"({sac_fluxo.rotulo_do_estado(estado)}). {link}")
+                evento["channel"], f"🧪 _(ensaio)_ {aviso}",
+                thread_ts=evento["ts"])
 
     ok = _redesenhar(conn, claim_id, evento["channel"], evento["ts"])
 
@@ -275,7 +285,9 @@ def aplicar_clique(evento: Mapping[str, Any]) -> str:
         # job da noite, a Maria fecharia um caso e nao veria nada acontecer --
         # e um cofrinho que nao reage nao e um cofrinho.
         import cofrinho
-        cofrinho.publicar(canal=card_maria.CANAL)
+        # No canal onde o card vive -- nao no #sac fixo. Um ensaio no
+        # #sac-teste republicaria o placar na cara de quem opera.
+        cofrinho.publicar(channel_id=evento["channel"])
 
     return (f"claim {claim_id}: {acao} → {novo} por {evento.get('quem')}"
             + ("" if ok else "  [card não redesenhou]"))

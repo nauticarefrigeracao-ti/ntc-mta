@@ -253,3 +253,33 @@ def test_caso_finalizado_mantem_o_sinal_do_desfecho():
     t = [ev("recebi"), ev("estoque"), ev("mediacao"), ev("recusado"),
          ev("finalizar")]
     assert cofrinho(t) == "positivo"
+
+
+# --- a hora é a do relógio da Maria, não a do banco ------------------------
+#
+# Medido no primeiro clique real (06/08/2026): o Lucas clicou às 15:02 em
+# Praia Grande e o card imprimiu "18:02". O banco grava TIMESTAMPTZ e devolve
+# UTC; sem converter, toda marcação aparece três horas no futuro.
+#
+# Isso não é cosmético. A Thayná pediu data e hora justamente para responder
+# "quanto tempo esse caso levou" — e uma linha do tempo que mente no relógio
+# não responde nada. Pior: perto da meia-noite, 21h30 vira 00h30 do dia
+# seguinte e a marcação muda de DIA.
+
+def test_hora_e_a_do_relogio_de_quem_clicou():
+    l = linha_da_timeline(ev("recebi", quando="2026-08-06T18:02:00+00:00"))
+    assert "15:02" in l
+    assert "18:02" not in l
+
+
+def test_fim_da_noite_nao_pula_de_dia():
+    """21h30 de 06/08 em Praia Grande é 00h30 de 07/08 em UTC. Sem conversão,
+    a marcação aparece no dia seguinte."""
+    l = linha_da_timeline(ev("recebi", quando="2026-08-07T00:30:00+00:00"))
+    assert "06/08" in l and "21:30" in l
+
+
+def test_carimbo_ja_local_nao_e_convertido_de_novo():
+    """String sem fuso já é hora local — converter empurraria três horas."""
+    l = linha_da_timeline(ev("recebi", quando="2026-08-06T15:02:00"))
+    assert "15:02" in l

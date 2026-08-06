@@ -272,3 +272,28 @@ def test_mensagem_cabe_no_limite_do_slack():
             marca("mediacao", f"{d}T10:00:00-03:00"),
             marca("recusado", f"{d}T11:00:00-03:00")]))
     assert len(blocos_do_cofrinho(acumular(casos, *AGOSTO), HOJE)) <= 50
+
+
+# --- o placar de treino também se identifica -------------------------------
+#
+# Medido no QA dos 12 caminhos (06/08/2026): fechar os casos no #sac-teste
+# fez o cofrinho DAQUELE canal publicar "seguramos R$ 2.131,33". O número é
+# correto para o canal — é assim que a Maria vê o pote mexer enquanto treina
+# — mas sem selo é um print pronto para ser levado a uma reunião como se
+# fosse dinheiro de verdade. O card já avisa; o placar tem que avisar também.
+
+def test_cofrinho_de_ensaio_avisa():
+    txt = str(blocos_do_cofrinho(acumular([caso(1, 509.89, FECHADO_A_FAVOR)],
+                                          *AGOSTO), HOJE, ensaio=True))
+    assert "ensaio" in txt.lower() or "treino" in txt.lower()
+
+
+def test_cofrinho_de_ensaio_diz_que_nao_e_dinheiro():
+    txt = str(blocos_do_cofrinho(acumular([], *AGOSTO), HOJE,
+                                 ensaio=True)).lower()
+    assert "não é dinheiro" in txt or "nao e dinheiro" in txt
+
+
+def test_cofrinho_oficial_nao_tem_selo():
+    txt = str(blocos_do_cofrinho(acumular([], *AGOSTO), HOJE, ensaio=False))
+    assert "ensaio" not in txt.lower()

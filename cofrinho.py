@@ -105,14 +105,32 @@ def _sinal(timeline: Iterable[Mapping[str, Any]]) -> Optional[str]:
     return None
 
 
-def acumular(casos: Iterable[Mapping[str, Any]], ano: int, mes: int) -> dict:
-    """Soma os dois potes do mes, e o detalhe por dia."""
+def so_do_canal(timeline: Iterable[Mapping[str, Any]],
+                canal: Optional[str]) -> list:
+    """As marcacoes nascidas no canal informado.
+
+    Existe porque o card do #sac-teste aponta para o MESMO claim real do
+    #sac: sem isso, clicar para conferir se o botao funciona poria dinheiro
+    que nao existe no placar que o Gabriel le.
+    """
+    if not canal:
+        return list(timeline or [])
+    return [e for e in (timeline or []) if e.get("channel_id") == canal]
+
+
+def acumular(casos: Iterable[Mapping[str, Any]], ano: int, mes: int,
+             canal_oficial: Optional[str] = None) -> dict:
+    """Soma os dois potes do mes, e o detalhe por dia.
+
+    `canal_oficial` filtra fora o que foi clicado em canal de ensaio ou de
+    treinamento. Quem publica de verdade sempre passa esse canal.
+    """
     r: dict = {"positivo": 0.0, "negativo": 0.0, "saldo": 0.0,
                "n_positivo": 0, "n_negativo": 0, "por_dia": {},
                "sem_valor": []}
 
     for c in casos or []:
-        timeline = c.get("timeline") or []
+        timeline = so_do_canal(c.get("timeline") or [], canal_oficial)
         sinal = _sinal(timeline)
         if not sinal:
             continue
@@ -145,18 +163,32 @@ def _mes_por_extenso(d: date) -> str:
     return nomes[d.month - 1]
 
 
-def blocos_do_cofrinho(resumo: Mapping[str, Any], hoje: date) -> list[dict]:
-    """O placar do mes, do jeito que a Thayna desenhou: dois potes."""
+def blocos_do_cofrinho(resumo: Mapping[str, Any], hoje: date,
+                       ensaio: bool = False) -> list[dict]:
+    """O placar do mes, do jeito que a Thayna desenhou: dois potes.
+
+    `ensaio` marca o placar de um canal de treino. Medido no QA dos 12
+    caminhos: fechar os casos no #sac-teste fez aquele canal publicar
+    "seguramos R$ 2.131,33". O numero esta certo para o canal -- e assim que
+    a Maria ve o pote mexer enquanto treina -- mas sem selo e um print pronto
+    para ser levado a uma reuniao como se fosse dinheiro de verdade.
+    """
     def sec(t):
         return {"type": "section", "text": {"type": "mrkdwn", "text": t}}
 
-    blocos: list[dict] = [{
+    blocos: list[dict] = []
+    if ensaio:
+        blocos.append({"type": "context", "elements": [{
+            "type": "mrkdwn",
+            "text": "🧪 *ENSAIO* — placar do canal de treino. "
+                    "*Não é dinheiro*: o cofrinho de verdade fica no #sac."}]})
+    blocos.append({
         "type": "header",
         "text": {"type": "plain_text",
                  "text": f"🐷 Cofrinho de {_mes_por_extenso(hoje)} "
                          f"— até {hoje:%d/%m}",
                  "emoji": True},
-    }]
+    })
 
     if not (resumo["n_positivo"] or resumo["n_negativo"]
             or resumo["sem_valor"]):
@@ -251,16 +283,29 @@ def carregar(conn, ano: int, mes: int) -> list[dict]:
     return casos
 
 
-def publicar(canal: str = CANAL, dry_run: bool = False) -> int:
+def publicar(canal: str = CANAL, dry_run: bool = False,
+             channel_id: Optional[str] = None) -> int:
+    """Publica (ou atualiza) o placar do mes.
+
+    `channel_id` existe para o listener: o clique chega com o ID do canal
+    onde o card vive, e o cofrinho tem que pousar NESSE canal. Sem isso, um
+    ensaio no #sac-teste republicaria o placar no #sac -- placar de teste na
+    cara de quem opera.
+    """
     from src.db.connection import get_db_connection
 
     import slack_client
 
     hoje = datetime.now(BRT).date()
     conn = get_db_connection()
+    # O placar so conta o que foi clicado no canal OFICIAL. Treino e
+    # conferencia no #sac-teste ficam de fora -- essa era a pergunta certa
+    # do Lucas antes de clicar: "e se o produto nao tiver chegado?".
+    oficial = channel_id or slack_client.garantir_canal(CANAL)
     resumo = acumular(carregar(conn, hoje.year, hoje.month),
-                      hoje.year, hoje.month)
-    blocos = blocos_do_cofrinho(resumo, hoje)
+                      hoje.year, hoje.month, canal_oficial=oficial)
+    blocos = blocos_do_cofrinho(resumo, hoje,
+                                ensaio=bool(channel_id) and canal != CANAL)
 
     if dry_run:
         for b in blocos:
@@ -274,7 +319,7 @@ def publicar(canal: str = CANAL, dry_run: bool = False) -> int:
         cur.execute(_DDL)
     conn.commit()
 
-    cid = slack_client.garantir_canal(canal)
+    cid = oficial
     if not cid:
         print(f"não consegui abrir {canal}", file=sys.stderr)
         return 1
@@ -284,8 +329,11 @@ def publicar(canal: str = CANAL, dry_run: bool = False) -> int:
                   f"escapou {_fmt_brl(resumo['negativo'])}")
 
     cur = conn.cursor()
-    cur.execute("SELECT ts FROM sac_paineis WHERE chave = %s AND channel_id = %s",
-                (CHAVE_PAINEL, cid))
+    # A chave carrega o canal: o mesmo placar publicado no #sac-teste e no
+    # #sac sao mensagens diferentes. Chave unica faria o segundo publish
+    # sobrescrever o `ts` do primeiro e orfanar a mensagem la.
+    chave = f"{CHAVE_PAINEL}:{cid}"
+    cur.execute("SELECT ts FROM sac_paineis WHERE chave = %s", (chave,))
     linha = cur.fetchone()
 
     if linha:
@@ -307,7 +355,7 @@ def publicar(canal: str = CANAL, dry_run: bool = False) -> int:
             ON CONFLICT (chave) DO UPDATE
               SET ts = EXCLUDED.ts, channel_id = EXCLUDED.channel_id,
                   atualizado = now()
-        """, (CHAVE_PAINEL, cid, r["ts"]))
+        """, (chave, cid, r["ts"]))
     conn.commit()
     print(f"cofrinho publicado: {resumo_txt}")
     return 0
