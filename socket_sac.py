@@ -55,6 +55,21 @@ CANAL_SUPERVISOR = "#sac-supervisao"
 
 PREFIXO = "sac_"
 
+# Conexoes simultaneas ao Socket Mode. A documentacao oficial permite ate 10
+# e recomenda explicitamente mais de uma:
+#
+#   "you can use multiple connections for temporary active-active redundancy"
+#   "generate an additional connection BEFORE the restart occurs"
+#
+# O Slack refresca a conexao "once every few hours". Com uma so, cada refresh
+# e um buraco entre fechar e reabrir -- e a doc NAO diz o que acontece com um
+# clique quando ha zero conexoes abertas. E por ser indocumentado que a gente
+# nao deixa o buraco existir.
+#
+# Duas cobrem o refresh; dez seriam socket e chamada a mais sem cobertura
+# extra, porque cada envelope vai para UMA conexao so.
+CONEXOES = 2
+
 
 def _app_token() -> Optional[str]:
     tok = (os.environ.get("SLACK_APP_TOKEN") or "").strip()
@@ -163,8 +178,14 @@ def deve_atualizar_cofrinho(acao: str) -> bool:
     """So o desfecho mexe no placar.
 
     Redesenhar o cofrinho a cada "recebi" seria uma chamada ao Slack por
-    clique sem nada mudar no numero -- e o rate limit de app nao-Marketplace
-    e de 1 requisicao por minuto por metodo.
+    clique sem nada mudar no numero. Barato, mas inutil -- e ruido no canal.
+
+    CORRECAO: eu tinha escrito aqui que o limite era "1 requisicao por
+    minuto por metodo". Errado. Aquele limite vale so para
+    `conversations.history` e `conversations.replies`, e so para apps
+    distribuidos fora do Marketplace. Apps internos como o nosso mantem os
+    limites antigos, e `chat.update` e Tier 3 (50+/min).
+    https://docs.slack.dev/changelog/2025/06/03/rate-limits-clarity/
     """
     import cofrinho
 
@@ -339,12 +360,14 @@ def aplicar_clique(evento: Mapping[str, Any]) -> str:
             + ("" if ok else "  [card não redesenhou]"))
 
 
-async def _uma_conexao(vistos: set, ate: Optional[float]) -> str:
+async def _uma_conexao(vistos: set, ate: Optional[float],
+                       n: int = 0) -> str:
     """Uma sessao de Socket Mode. Devolve por que ela terminou."""
     from websockets.asyncio.client import connect
 
     url = abrir_conexao()
-    print(f"conectado — escutando cliques em {card_maria.CANAL}", flush=True)
+    print(f"[conexão {n}] conectada — escutando {card_maria.CANAL}",
+          flush=True)
 
     async with connect(url, open_timeout=20) as ws:
         async for cru in ws:
@@ -432,44 +455,54 @@ async def escutar(duracao_min: Optional[int] = None) -> int:
     """
     ate = time.monotonic() + duracao_min * 60 if duracao_min else None
     vistos: set = set()
-    espera = 1.0
     pulso = asyncio.create_task(
         _pulsar(listener_saude.nome_da_instancia()))
 
-    while True:
-        # O `async for` fica bloqueado esperando clique, entao a checagem de
-        # prazo la dentro so acontecia QUANDO alguem clicava. Num dia parado
-        # o job ia ate o Actions matar -- o oposto de sair planejado. O
-        # relogio tem que correr por fora, independente de haver trafego.
+    # Redundancia ativa-ativa, como a doc do Slack recomenda: enquanto uma
+    # conexao e refrescada, a outra continua recebendo. `vistos` e
+    # compartilhado -- se o mesmo envelope chegar nas duas, ele so vira
+    # marcacao uma vez.
+    conexoes = [asyncio.create_task(_manter_conexao(n, vistos, ate))
+                for n in range(CONEXOES)]
+    try:
         restante = (ate - time.monotonic()) if ate else None
-        if restante is not None and restante <= 0:
-            print("encerrando: prazo do job cumprido", flush=True)
-            pulso.cancel()
-            return 0
+        await asyncio.wait(conexoes, timeout=restante)
+        print("encerrando: prazo do job cumprido", flush=True)
+        return 0
+    finally:
+        pulso.cancel()
+        for c in conexoes:
+            c.cancel()
+
+
+async def _manter_conexao(n: int, vistos: set, ate: Optional[float]) -> None:
+    """Uma das conexoes, viva enquanto o job durar.
+
+    Cada uma se reconecta por conta propria. Quem decide o fim do expediente
+    e `escutar`, por fora -- o `async for` fica bloqueado esperando clique, e
+    conferir o prazo aqui dentro so funcionaria quando alguem clicasse.
+    """
+    espera = 1.0
+    while True:
+        if ate and time.monotonic() >= ate:
+            return
         try:
-            motivo = await asyncio.wait_for(
-                _uma_conexao(vistos, ate), timeout=restante)
+            motivo = await _uma_conexao(vistos, ate, n)
             espera = 1.0
-        except (asyncio.TimeoutError, TimeoutError):
-            print("encerrando: prazo do job cumprido", flush=True)
-            pulso.cancel()
-            return 0
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             motivo = f"caiu: {e!r}"
 
-        vencido = bool(ate and time.monotonic() >= ate)
-        if vencido:
-            print(f"encerrando: {motivo}", flush=True)
-            return 0
-        if eh_encerramento_limpo(vencido):
-            pulso.cancel()
-            return 0
+        if ate and time.monotonic() >= ate:
+            return
 
-        print(f"reconectando em {espera:.0f}s — {motivo}",
+        print(f"[conexão {n}] reconectando em {espera:.0f}s — {motivo}",
               file=sys.stderr, flush=True)
         await asyncio.sleep(espera)
-        # Teto baixo de propósito: minuto sem listener é clique perdido na
-        # cara da Maria, não linha a mais no log.
+        # Teto baixo de propósito: com a outra conexão no ar isto não é
+        # urgente, mas se as duas caírem juntas, minuto parado é clique
+        # perdido na cara da Maria — não linha a mais no log.
         espera = min(espera * 2, 30.0)
 
 

@@ -260,3 +260,43 @@ def test_socket_fechado_e_encerramento_limpo_so_no_fim_do_prazo():
 def test_envelope_id_viaja_com_o_evento():
     assert interpretar(envelope_de_clique(envelope_id="env-42"))[
         "envelope_id"] == "env-42"
+
+
+# --- redundância ativa-ativa, como o Slack manda --------------------------
+#
+# Documentação oficial (docs.slack.dev/apis/events-api/using-socket-mode):
+#
+#   "Socket Mode allows your app to maintain up to 10 open WebSocket
+#    connections at the same time."
+#   "When multiple connections are active, each payload may be sent to ANY
+#    of the connections."
+#   "If you'd like to gracefully restart your app's services, you can use
+#    multiple connections for temporary active-active redundancy."
+#
+# A primeira versão fechava a conexão ao receber `disconnect` e SÓ ENTÃO
+# abria outra. Entre o fechar e o abrir cabe um `apps.connections.open`
+# inteiro — e o Slack refresca "once every few hours", então era um buraco
+# por conexão por hora, todo dia, para sempre.
+#
+# Não dá para provar aqui que nada se perde no buraco: a doc NÃO diz o que
+# acontece com um payload quando há zero conexões abertas. É justamente por
+# ser indocumentado que a gente não deixa o buraco existir.
+
+from socket_sac import CONEXOES
+
+
+def test_mantemos_mais_de_uma_conexao():
+    """Uma só significa que todo refresh do Slack é um buraco."""
+    assert CONEXOES >= 2
+
+
+def test_respeitamos_o_teto_de_dez_do_slack():
+    """Acima de 10 o Slack recusa — e recusar conexão é ficar com menos
+    redundância do que se pediu, não com mais."""
+    assert CONEXOES <= 10
+
+
+def test_nao_exageramos_na_redundancia():
+    """Cada conexão é um `apps.connections.open` e um socket vivo. Duas
+    cobrem o refresh; dez seriam custo sem cobertura extra."""
+    assert CONEXOES <= 3
