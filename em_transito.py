@@ -230,13 +230,31 @@ def coletar(limite: Optional[int] = None) -> dict:
         contas["com_retorno"] += 1
 
         previsao = transportadora = metodo = None
+        historico = atrasos = carrier_url = None
         if r["shipment_id"]:
-            det = _get(f"{API}/shipments/{r['shipment_id']}", tok, novo_formato=True)
+            sid = r["shipment_id"]
+            det = _get(f"{API}/shipments/{sid}", tok, novo_formato=True)
             if det:
                 previsao = previsao_do_detalhe(det)
                 metodo = det.get("tracking_method")
                 transportadora = ((det.get("lead_time") or {})
                                   .get("shipping_method") or {}).get("name")
+
+            # A viagem em etapas, o atraso que o proprio ML declara, e o link
+            # de rastreio da transportadora. Sao tres chamadas a mais por
+            # caso; o backoff de 429 ja cobre a rajada.
+            h = _get(f"{API}/shipments/{sid}/history", tok, novo_formato=True)
+            if h:
+                historico = json.dumps(h)
+                contas["com_historico"] = contas.get("com_historico", 0) + 1
+            d = _get(f"{API}/shipments/{sid}/delays", tok, novo_formato=True)
+            if d and (d.get("delays") or []):
+                atrasos = json.dumps(d["delays"])
+                contas["com_atraso"] = contas.get("com_atraso", 0) + 1
+            car = _get(f"{API}/shipments/{sid}/carrier", tok, novo_formato=True)
+            if car:
+                carrier_url = car.get("url")
+                transportadora = car.get("name") or transportadora
         if previsao:
             contas["com_previsao"] += 1
         contas[r["destino"] or "sem_destino"] = \
@@ -262,12 +280,16 @@ def coletar(limite: Optional[int] = None) -> dict:
                 -- permite o card dizer "ha 4 minutos" em vez
                 -- de "atualizado 07/08", que nao responde a
                 -- pergunta que a Maria tem.
+                return_historico = COALESCE(%(hist)s, return_historico),
+                return_atrasos = %(atr)s,
+                return_carrier_url = COALESCE(%(curl)s, return_carrier_url),
                 synced_at = now()
             WHERE claim_id = %(cid)s
         """, {"cid": claim_id, "rid": r["return_id"], "st": r["status"],
               "sid": r["shipment_id"], "trk": r["tracking_number"],
               "sst": r["shipment_status"], "prev": previsao,
-              "dest": r["destino"], "tp": transportadora, "mt": metodo})
+              "dest": r["destino"], "tp": transportadora, "mt": metodo,
+              "hist": historico, "atr": atrasos, "curl": carrier_url})
     conn.commit()
     return contas
 
@@ -277,6 +299,13 @@ ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS return_destino TEXT;
 ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS return_transportadora TEXT;
 ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS return_metodo TEXT;
 ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS pack_id BIGINT;
+
+-- A viagem do pacote. Guardamos o JSON cru do ML de proposito: o card so
+-- precisa de quatro etapas, mas quando alguem perguntar "por que esse caso
+-- demorou 9 dias" a resposta vai estar aqui inteira.
+ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS return_historico TEXT;
+ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS return_atrasos TEXT;
+ALTER TABLE ml_devolucoes ADD COLUMN IF NOT EXISTS return_carrier_url TEXT;
 """
 
 
@@ -304,6 +333,8 @@ def main() -> int:
     print(f"  casos abertos     : {c['casos']}")
     print(f"  com devolução     : {c['com_retorno']}")
     print(f"  com previsão      : {c['com_previsao']}")
+    print(f"  com histórico      : {c.get('com_historico', 0)}")
+    print(f"  com atraso do ML   : {c.get('com_atraso', 0)}")
     print(f"  -> chegam na LOJA  : {c.get('loja', 0)}   (a Maria recebe)")
     print(f"  -> vao para o FULL : {c.get('full', 0)}   (o ML tria)")
     print(f"  destino desconhec.: {c.get('sem_destino', 0)}")

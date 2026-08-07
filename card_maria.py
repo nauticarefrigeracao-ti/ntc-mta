@@ -27,11 +27,13 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import date, datetime
+import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import envio
 import sac_fluxo
 from em_transito import dia_da_previsao
 from slack_notify import _fmt_brl, motivo_humano
@@ -188,7 +190,34 @@ def blocos_do_card(caso: Mapping[str, Any],
     linha = situacao_do_envio(caso, hoje)
     rastreio = caso.get("return_tracking_number")
     if rastreio:
-        linha += f"\nrastreio `{rastreio}`"
+        tp = caso.get("return_transportadora") or ""
+        curl = caso.get("return_carrier_url")
+        if curl:
+            linha += f"\nrastreio `<{curl}|{rastreio}>`" + (f" · {tp}" if tp else "")
+        else:
+            linha += f"\nrastreio `{rastreio}`" + (f" · {tp}" if tp else "")
+
+    hist_raw = caso.get("return_historico")
+    if hist_raw:
+        try:
+            raw = json.loads(hist_raw) if isinstance(hist_raw, str) else hist_raw
+            etapas = envio.etapas_do_envio(raw)
+            linha_v = envio.linha_do_envio(etapas)
+            if linha_v:
+                linha += f"\n\n*Viagem do pacote:*\n{linha_v}"
+        except Exception:
+            pass
+
+    atrasos_raw = caso.get("return_atrasos")
+    if atrasos_raw:
+        try:
+            raw_a = json.loads(atrasos_raw) if isinstance(atrasos_raw, str) else atrasos_raw
+            atr = envio.atraso_declarado(raw_a)
+            if atr:
+                linha += f"\n\n⚠️ *Aviso do Mercado Livre:* {atr['texto']}"
+        except Exception:
+            pass
+
     blocos.append(_sec(linha))
 
     blocos.append({"type": "context", "elements": [
@@ -294,6 +323,7 @@ SQL_CASOS = """
            d.item_thumbnail, d.reason_label, d.date_created,
            d.return_destino, d.return_estimated_delivery, d.return_status,
            d.return_tracking_number, d.return_transportadora,
+           d.return_historico, d.return_atrasos, d.return_carrier_url,
            COALESCE(i.unidades, 1) AS unidades,
            COALESCE(i.valor, d.order_total) AS valor
     FROM ml_devolucoes d

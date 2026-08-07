@@ -284,3 +284,28 @@ def test_card_encerrado_mantem_o_pedido_visivel():
 def test_card_encerrado_diz_onde_conferir():
     txt = str(blocos_encerrado(1, 2)).lower()
     assert "mercado livre" in txt
+
+
+def test_card_mostra_viagem_do_pacote():
+    hist = [
+        {"date": "2026-07-29T10:08:55.437-04:00", "substatus": "printed", "status": "ready_to_ship"},
+        {"date": "2026-08-03T10:53:42.000-04:00", "substatus": None, "status": "shipped"},
+    ]
+    txt = str(blocos_do_card(caso(return_historico=hist), [], HOJE))
+    assert "Viagem do pacote" in txt
+    assert "Despachado" in txt
+
+
+def test_card_mostra_aviso_de_atraso_do_ml():
+    atr = [{"type": "shipping_delayed", "date": "2026-08-07T05:15:14Z"}]
+    txt = str(blocos_do_card(caso(return_atrasos=atr), [], HOJE))
+    assert "Aviso do Mercado Livre" in txt
+    assert "transportadora" in txt.lower()
+
+
+def test_card_mostra_link_da_transportadora():
+    c = caso(return_tracking_number="AP123456BR",
+             return_carrier_url="https://rastreio.correios.com.br/AP123456BR")
+    txt = str(blocos_do_card(c, [], HOJE))
+    assert "<https://rastreio.correios.com.br/AP123456BR|AP123456BR>" in txt
+
