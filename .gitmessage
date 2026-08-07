@@ -1,0 +1,19 @@
+# <tipo>(<escopo>): o defeito ou a decisão, não o arquivo tocado
+#
+# Corpo — cinco blocos, nesta ordem. Um modelo diferente vai ler isto sem ter
+# visto a conversa; o que não estiver aqui, se perdeu.
+#
+#   1. SINTOMA    o que apareceu, quando, para quem
+#   2. MEDIÇÃO    endpoint, amostra, data, número (medir antes de afirmar)
+#   3. DECISÃO    o que passa a valer
+#   4. DESCARTADO a alternativa que não seguimos, e por quê
+#   5. INVARIANTE que teste passa a impedir a reincidência
+#
+# Trailers (últimas linhas, sem linha em branco entre elas). São o que permite
+# reconstruir o mapa sem ler o histórico inteiro:
+#
+#   Medido-em: <endpoint ou fonte>, amostra <id>, <data>
+#   Invariante: tests/test_x.py::test_y
+#   Descartado: <alternativa> — <por quê>
+#   Refs: harness/DOCUMENTO.md
+#   Co-Authored-By: <modelo>
