@@ -226,6 +226,28 @@ def blocos_do_card(caso: Mapping[str, Any],
     return blocos[:MAX_BLOCOS]
 
 
+def blocos_encerrado(claim_id: int, numero: int) -> list[dict]:
+    """O card de um caso que fechou no Mercado Livre.
+
+    Medido em 07/08/2026: o Slack tinha 8 cards e o ML so 6 casos abertos.
+    Dois haviam sido encerrados na plataforma e os cards continuavam na tela
+    com todos os botoes -- a Maria clicaria em "Recebi o produto" num caso
+    que nao existe mais.
+
+    Apagar seria pior: some da tela e ninguem entende o que houve com aquele
+    pedido. Ele fica, dizendo que acabou, e sem botao nenhum.
+    """
+    return [
+        _sec(f"~*<https://www.mercadolivre.com.br/vendas/{numero}/detalhe|"
+             f"#{numero}>*~  ·  ✅ *Caso encerrado*"),
+        {"type": "context", "elements": [{
+            "type": "mrkdwn",
+            "text": "Este caso foi encerrado no Mercado Livre e saiu da lista "
+                    "de devoluções abertas. Nada mais a fazer aqui — o "
+                    "resultado em dinheiro entra no balanço do mês."}]},
+    ]
+
+
 # --- I/O -------------------------------------------------------------------
 
 _DDL = """
@@ -426,12 +448,32 @@ def publicar(canal: str = CANAL, dry_run: bool = False) -> int:
         conn.commit()
         novos += 1
 
+    # Card cujo caso saiu da lista de abertos: fechou no Meli. Marcar e
+    # obrigatorio -- deixar com botao e convidar a Maria a agir sobre um caso
+    # que nao existe mais.
+    vivos = {c["claim_id"] for c in ativos} | {c["claim_id"] for c in parados}
+    encerrados = 0
+    for claim, ts in ja.items():
+        if claim in vivos:
+            continue
+        cur.execute("SELECT order_id, pack_id FROM ml_devolucoes "
+                    "WHERE claim_id = %s", (claim,))
+        linha = cur.fetchone()
+        if not linha:
+            continue
+        numero = linha[1] or linha[0]
+        if slack_client.update_message(
+                cid, ts, f"Caso encerrado — #{numero}",
+                blocks=blocos_encerrado(claim, numero)):
+            encerrados += 1
+
     alerta = texto_de_alerta(len(parados))
     if alerta:
         slack_client.post_message(canal, alerta)
 
     print(f"{novos} card(s) novo(s) · {atualizados} atualizado(s) · "
-          f"{falhas} falha(s) · {len(parados)} parado(s) fora da lista")
+          f"{encerrados} encerrado(s) · {falhas} falha(s) · "
+          f"{len(parados)} parado(s) fora da lista")
     # Falha calada foi o que escondeu o erro do sync por semanas.
     return 1 if falhas else 0
 

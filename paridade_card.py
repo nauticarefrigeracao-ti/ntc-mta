@@ -246,7 +246,7 @@ def main() -> int:
 
     import em_transito
 
-    n_dado = n_tempo = n_ok = 0
+    n_dado = n_tempo = n_ok = n_fechados = 0
     atrasos = []
     for claim in claims:
         # Oito casos x duas chamadas em rajada tomam 429 do ML no meio, e o
@@ -254,6 +254,11 @@ def main() -> int:
         # nao ha. Meio segundo entre casos custa 4s no total.
         time.sleep(0.5)
         do_card = _do_banco(conn, claim)
+        if do_card is None:
+            # Caso fechou no Meli e saiu da lista de abertos. O card ja foi
+            # marcado como encerrado -- nao e divergencia, e ciclo de vida.
+            n_fechados += 1
+            continue
         # `numero` e o pack (o que a Maria LE na tela); `order_id` e o que a
         # API do ML ACEITA em /orders/. Passar o pack aqui devolvia 404, e o
         # 404 virava "nao consegui ler o Mercado Livre" -- que se leria como
@@ -281,7 +286,10 @@ def main() -> int:
             print(f"     [{tipo}] {explicar(d, atraso)}")
         print()
 
-    print(f"  {n_ok} de {len(claims)} card(s) sem nenhuma divergência")
+    print(f"  {n_ok} de {len(claims) - n_fechados} card(s) ativo(s) sem "
+          f"nenhuma divergência")
+    if n_fechados:
+        print(f"  {n_fechados} caso(s) encerrado(s) no Meli — card marcado")
     print(f"  divergências de DADO  : {n_dado}   (defeito)")
     print(f"  divergências de TEMPO : {n_tempo}   (atraso)")
     if atrasos:

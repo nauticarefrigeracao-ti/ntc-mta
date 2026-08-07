@@ -1,9 +1,12 @@
 """O fluxo do caso de SAC -- a escada que a Thayna desenhou em 06/08/2026.
 
     (1) recebido -> (2) estoque | garantia
-                 -> (3) mediacao | whatsapp | sem argumento
+                 -> (3) mediacao | sem argumento
                  -> (4) reembolsado | recusado
                  -> (5) finalizar
+
+                 e, SO depois de recusado:
+                 -> whatsapp (segunda tentativa) -> reembolsado | finalizar
 
 Tres decisoes que este modulo toma, e por que:
 
@@ -46,21 +49,24 @@ _ESCADA: dict[str, list[tuple[str, str, str, Optional[str]]]] = {
         ("estoque", "no_estoque", "📦 Estoque", None),
         ("garantia", "em_garantia", "🔧 Garantia", None),
     ],
+    # O WhatsApp NAO e irmao de Mediacao. Ele e SEGUNDA TENTATIVA, e so
+    # aparece depois que a primeira via terminou em recusa -- correcao do
+    # Lucas em 07/08/2026, clicando no card: "pode ser que a Maria tente
+    # recontato via whatsapp, e possa ser que recupere, ou nao".
+    #
+    # Oferecer os dois juntos no mesmo degrau convidava a Maria a escolher o
+    # WhatsApp ANTES de abrir mediacao -- e mediacao tem prazo no Mercado
+    # Livre. Perder o prazo por ter tentado conversar primeiro e o erro caro
+    # que este desenho evita.
     "no_estoque": [
         ("mediacao", "mediacao", "⚖️ Mediação", None),
-        ("whatsapp", "whatsapp", "💬 WhatsApp", None),
         ("sem_argumento", "sem_argumento", "🚫 Sem argumento", None),
     ],
     "em_garantia": [
         ("mediacao", "mediacao", "⚖️ Mediação", None),
-        ("whatsapp", "whatsapp", "💬 WhatsApp", None),
         ("sem_argumento", "sem_argumento", "🚫 Sem argumento", None),
     ],
     "mediacao": [
-        ("reembolsado", "reembolsado", "💸 Reembolsado", None),
-        ("recusado", "recusado", "❌ Recusado", "danger"),
-    ],
-    "whatsapp": [
         ("reembolsado", "reembolsado", "💸 Reembolsado", None),
         ("recusado", "recusado", "❌ Recusado", "danger"),
     ],
@@ -71,7 +77,17 @@ _ESCADA: dict[str, list[tuple[str, str, str, Optional[str]]]] = {
     "reembolsado": [
         ("finalizar", "finalizado", "✅ Finalizar", "primary"),
     ],
+    # Depois da recusa a Maria ainda pode tentar. O caso NAO fecha sozinho
+    # aqui: ela decide se vale um contato direto ou se encerra.
     "recusado": [
+        ("whatsapp", "whatsapp", "💬 Tentar no WhatsApp", None),
+        ("finalizar", "finalizado", "✅ Finalizar", "primary"),
+    ],
+    # A segunda tentativa tem dois fins: virou reembolso, ou ficou como
+    # estava e se encerra. Voltar para "recusado" daqui criaria um ciclo --
+    # e ciclo permitiria contar o mesmo dinheiro duas vezes no cofrinho.
+    "whatsapp": [
+        ("reembolsado", "reembolsado", "💸 Reembolsado", None),
         ("finalizar", "finalizado", "✅ Finalizar", "primary"),
     ],
     "finalizado": [],
@@ -96,7 +112,7 @@ _ETAPAS = {
     "estoque": "📦 Foi para o estoque",
     "garantia": "🔧 Foi para a garantia",
     "mediacao": "⚖️ Abriu mediação",
-    "whatsapp": "💬 Falou no WhatsApp",
+    "whatsapp": "💬 Tentou no WhatsApp",
     "sem_argumento": "🚫 Sem argumento",
     "reembolsado": "💸 Reembolsado",
     "recusado": "❌ Recusado",

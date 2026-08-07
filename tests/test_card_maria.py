@@ -249,3 +249,38 @@ def test_card_cabe_no_limite_do_slack():
     """50 blocos por mensagem. Estourar derruba a publicação inteira."""
     t = [{"etapa": "observacao", "observacao": f"nota {i}"} for i in range(40)]
     assert len(blocos_do_card(caso(), t, HOJE)) <= 50
+
+
+# --- caso que fechou no Meli não pode ficar com card vivo ------------------
+#
+# Medido em 07/08/2026: o Slack tinha 8 cards e o Mercado Livre só 6 casos
+# abertos. Dois haviam sido encerrados na plataforma, e os cards continuavam
+# na tela com todos os botões — a Maria clicaria em "Recebi o produto" num
+# caso que não existe mais.
+#
+# Apagar o card seria pior: some da tela e ninguém entende o que aconteceu
+# com aquele pedido. Ele fica, dizendo que acabou.
+
+from card_maria import blocos_encerrado
+
+
+def test_card_encerrado_diz_que_acabou():
+    txt = str(blocos_encerrado(5552858975, 2000014291726681))
+    assert "encerrad" in txt.lower()
+
+
+def test_card_encerrado_nao_tem_botao():
+    """Botão que age sobre caso inexistente é o pior tipo de botão."""
+    tipos = [b["type"] for b in blocos_encerrado(1, 2)]
+    assert "actions" not in tipos
+
+
+def test_card_encerrado_mantem_o_pedido_visivel():
+    """Some da tela é pior que ficar: ninguém entende o que houve com o
+    pedido."""
+    assert "2000014291726681" in str(blocos_encerrado(1, 2000014291726681))
+
+
+def test_card_encerrado_diz_onde_conferir():
+    txt = str(blocos_encerrado(1, 2)).lower()
+    assert "mercado livre" in txt

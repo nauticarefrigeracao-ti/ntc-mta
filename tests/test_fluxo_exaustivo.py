@@ -41,13 +41,14 @@ from sac_fluxo import (
 PERMITIDO = {
     "a_caminho":     {"recebi"},
     "recebido":      {"estoque", "garantia"},
-    "no_estoque":    {"mediacao", "whatsapp", "sem_argumento"},
-    "em_garantia":   {"mediacao", "whatsapp", "sem_argumento"},
+    "no_estoque":    {"mediacao", "sem_argumento"},
+    "em_garantia":   {"mediacao", "sem_argumento"},
     "mediacao":      {"reembolsado", "recusado"},
-    "whatsapp":      {"reembolsado", "recusado"},
     "sem_argumento": {"reembolsado", "recusado"},
     "reembolsado":   {"finalizar"},
-    "recusado":      {"finalizar"},
+    # O WhatsApp é SEGUNDA TENTATIVA: só existe depois da recusa.
+    "recusado":      {"whatsapp", "finalizar"},
+    "whatsapp":      {"reembolsado", "finalizar"},
     "finalizado":    set(),
 }
 
@@ -120,11 +121,12 @@ def todos_os_caminhos(estado=ESTADO_INICIAL, visitados=()):
 CAMINHOS = list(todos_os_caminhos())
 
 
-def test_o_desenho_tem_doze_caminhos():
-    """1 × 2 (estoque|garantia) × 3 (mediação|whatsapp|sem argumento)
-    × 2 (reembolsado|recusado) × 1 = 12. Se esse número mudar, o fluxo
-    mudou — e mudar o fluxo da Maria sem avisar é o que quebra treinamento."""
-    assert len(CAMINHOS) == 12
+def test_o_desenho_tem_dezesseis_caminhos():
+    """2 (estoque|garantia) × 2 (mediação|sem argumento) × 4 desfechos:
+    reembolsado→fim, recusado→fim, recusado→whatsapp→fim, e
+    recusado→whatsapp→reembolsado→fim. Se esse número mudar, o fluxo mudou —
+    e mudar o fluxo da Maria sem avisar é o que quebra treinamento."""
+    assert len(CAMINHOS) == 16
 
 
 @pytest.mark.parametrize("caminho", CAMINHOS, ids=lambda c: "→".join(c))
@@ -206,10 +208,17 @@ def test_so_existe_um_estado_terminal():
     assert sem_saida == ["finalizado"]
 
 
-def test_nenhum_caminho_passa_de_cinco_cliques():
-    """A Maria fecha um caso em cinco toques. Se um percurso precisar de
-    mais, o desenho cresceu sem ninguém decidir isso."""
-    assert max(len(c) for c in CAMINHOS) <= 5
+def test_o_caminho_curto_fecha_em_cinco_cliques():
+    """O percurso comum — recebi, destino, tratativa, desfecho, finalizar."""
+    assert min(len(c) for c in CAMINHOS) == 5
+
+
+def test_a_segunda_tentativa_custa_no_maximo_dois_cliques_a_mais():
+    """Só o retry do WhatsApp passa de cinco, e por decisão explícita. Se
+    outro caminho crescer, o desenho inchou sem ninguém decidir."""
+    assert max(len(c) for c in CAMINHOS) == 7
+    longos = [c for c in CAMINHOS if len(c) > 5]
+    assert all("whatsapp" in c for c in longos)
 
 
 # --- 4. caos --------------------------------------------------------------

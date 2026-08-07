@@ -300,3 +300,29 @@ def test_nao_exageramos_na_redundancia():
     """Cada conexão é um `apps.connections.open` e um socket vivo. Duas
     cobrem o refresh; dez seriam custo sem cobertura extra."""
     assert CONEXOES <= 3
+
+
+# --- a coleta mora no listener, não num cron ------------------------------
+#
+# Medido em 07/08/2026: o card mostrava "a caminho" enquanto o Mercado Livre
+# já dizia "entregue" há 2h40. Não era defeito de dado — era atraso, porque
+# nenhum agendamento rodava a coleta. Ela só acontecia quando o dev a
+# executava na mão. Esse é o defeito de independência, não de qualidade.
+#
+# A coleta vai para dentro do listener porque ele é o único processo que já
+# fica 24/7 de pé e já tem o token do ML. Um agendamento separado seria mais
+# uma coisa para cair calada — e foi exatamente assim que a tabela `orders`
+# ficou 13 dias congelada em julho.
+
+from socket_sac import COLETA_MIN
+
+
+def test_a_coleta_roda_com_frequencia_util():
+    """Acima de 15 min a Maria trabalha com informação de outro turno."""
+    assert COLETA_MIN <= 15
+
+
+def test_a_coleta_nao_martela_a_api():
+    """Abaixo de 5 min são 288 ciclos/dia sem ganho — o estado de uma
+    devolução não muda a cada 3 minutos."""
+    assert COLETA_MIN >= 5

@@ -73,9 +73,15 @@ def test_do_estoque_abre_mediacao():
     assert aplicar("no_estoque", "mediacao") == "mediacao"
 
 
-def test_da_garantia_tambem_abre_whatsapp():
-    """A Thayná desenhou os dois caminhos chegando nas mesmas três saídas."""
-    assert aplicar("em_garantia", "whatsapp") == "whatsapp"
+def test_whatsapp_nao_e_irmao_de_mediacao():
+    """Correção do Lucas em 07/08/2026, clicando no card. Oferecer os dois no
+    mesmo degrau convidava a Maria a tentar conversar ANTES de abrir mediação
+    — e mediação tem prazo no Mercado Livre. Perder o prazo por ter tentado
+    o WhatsApp primeiro é o erro caro que este desenho evita."""
+    with pytest.raises(ValueError):
+        aplicar("em_garantia", "whatsapp")
+    with pytest.raises(ValueError):
+        aplicar("no_estoque", "whatsapp")
 
 
 def test_sem_argumento_e_uma_saida_valida():
@@ -86,8 +92,20 @@ def test_mediacao_termina_em_reembolso():
     assert aplicar("mediacao", "reembolsado") == "reembolsado"
 
 
-def test_whatsapp_pode_terminar_recusado():
-    assert aplicar("whatsapp", "recusado") == "recusado"
+def test_whatsapp_e_segunda_tentativa_depois_da_recusa():
+    """"Pode ser que a Maria tente recontato via whatsapp, e possa ser que
+    recupere, ou não" — é retry, não alternativa."""
+    assert aplicar("recusado", "whatsapp") == "whatsapp"
+
+
+def test_a_segunda_tentativa_pode_virar_reembolso():
+    assert aplicar("whatsapp", "reembolsado") == "reembolsado"
+
+
+def test_a_segunda_tentativa_nao_volta_para_recusado():
+    """Voltar criaria ciclo — e ciclo contaria o mesmo dinheiro duas vezes."""
+    with pytest.raises(ValueError):
+        aplicar("whatsapp", "recusado")
 
 
 def test_finalizar_encerra():

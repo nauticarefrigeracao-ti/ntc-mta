@@ -360,6 +360,41 @@ def aplicar_clique(evento: Mapping[str, Any]) -> str:
             + ("" if ok else "  [card não redesenhou]"))
 
 
+# De quanto em quanto tempo o listener vai buscar novidade no Mercado Livre.
+#
+# Medido em 07/08/2026: sem ninguem rodando a coleta, o card mostrava
+# "a caminho" enquanto o Meli ja dizia "entregue" ha 2h40. Nao era defeito de
+# dado -- era atraso, porque a coleta so acontecia quando o dev a executava na
+# mao. Dez minutos e o que transforma "informacao de horas atras" em
+# "informacao de agora" sem martelar a API: ~144 ciclos por dia contra o
+# limite de 50+ requisicoes por minuto.
+COLETA_MIN = 10
+
+
+async def _coletar_do_meli() -> None:
+    """Busca previsao, destino e estado no ML enquanto o listener vive.
+
+    Mora AQUI, e nao num cron, porque este e o unico processo que ja fica
+    24/7 de pe e ja tem o token. Um agendamento separado seria mais uma coisa
+    para cair calada -- e foi exatamente assim que a tabela `orders` ficou 13
+    dias congelada em julho.
+    """
+    while True:
+        try:
+            import em_transito
+
+            c = em_transito.coletar()
+            print(f"[coleta] {c['com_previsao']} de {c['casos']} casos com "
+                  f"previsão · {c.get('loja', 0)} loja / {c.get('full', 0)} full",
+                  flush=True)
+        except Exception as e:
+            # Coleta e alimentacao, nao o coracao: se ela falhar, os botoes
+            # continuam funcionando. Mas falha FALANDO -- coleta que morre
+            # calada e o card envelhecendo sem ninguem perceber.
+            print(f"[coleta] falhou: {e!r}", file=sys.stderr, flush=True)
+        await asyncio.sleep(COLETA_MIN * 60)
+
+
 async def _uma_conexao(vistos: set, ate: Optional[float],
                        n: int = 0) -> str:
     """Uma sessao de Socket Mode. Devolve por que ela terminou."""
@@ -454,6 +489,7 @@ async def escutar(duracao_min: Optional[int] = None) -> int:
     vistos: set = set()
     pulso = asyncio.create_task(
         _pulsar(listener_saude.nome_da_instancia()))
+    coleta = asyncio.create_task(_coletar_do_meli())
 
     # Redundancia ativa-ativa, como a doc do Slack recomenda: enquanto uma
     # conexao e refrescada, a outra continua recebendo. `vistos` e
@@ -468,6 +504,7 @@ async def escutar(duracao_min: Optional[int] = None) -> int:
         return 0
     finally:
         pulso.cancel()
+        coleta.cancel()
         for c in conexoes:
             c.cancel()
 
