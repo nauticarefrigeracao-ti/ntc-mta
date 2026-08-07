@@ -29,6 +29,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import socket
 import sys
@@ -127,14 +128,21 @@ def fmt_dur(segundos: float) -> str:
 
 # --- I/O -------------------------------------------------------------------
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS sac_listener_pulso (
-    instancia TEXT        NOT NULL,
-    quando    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (instancia, quando)
-);
-CREATE INDEX IF NOT EXISTS ix_sac_pulso_quando ON sac_listener_pulso (quando);
-"""
+# Onde o pulso mora. ARQUIVO, nao banco -- e isso e uma correcao de custo,
+# nao de estilo.
+#
+# Medido em 07/08/2026: o Neon Free da 100 CU-hours/mes. O pulso de 30s
+# segura conexao aberta 24/7 e impede o autosuspend: 730h x 0,25 CU = 182
+# CU-hours, 82% ACIMA do teto. Estourar suspende o banco INTEIRO ate o mes
+# seguinte -- painel, jobs, listener, tudo. A instrumentacao derrubaria o
+# sistema que ela existe para vigiar.
+#
+# O pulso morava no Neon porque runs do GitHub sao efemeros e varios, e o
+# banco era o unico lugar compartilhado. Com um VPS so isso deixa de ser
+# verdade: arquivo local custa zero CU-hour e mede igual.
+ARQUIVO_PADRAO = Path(
+    os.environ.get("SAC_PULSO_ARQUIVO")
+    or (Path.home() / ".ntc-sac" / "pulso.jsonl"))
 
 
 def nome_da_instancia() -> str:
@@ -145,46 +153,68 @@ def nome_da_instancia() -> str:
     return f"local-{socket.gethostname()}"
 
 
-def garantir_tabela(conn) -> None:
-    with conn.cursor() as cur:
-        cur.execute(_DDL)
-    conn.commit()
+def bater_arquivo(caminho: Path, instancia: str) -> None:
+    """Uma linha por pulso. Append e atomico o bastante para uma linha curta."""
+    caminho = Path(caminho)
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    linha = json.dumps({"instancia": instancia,
+                        "quando": datetime.now(timezone.utc).isoformat()})
+    with caminho.open("a", encoding="utf-8") as f:
+        f.write(linha + "\n")
 
 
-def bater(conn, instancia: str) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO sac_listener_pulso (instancia) VALUES (%s) "
-            "ON CONFLICT DO NOTHING", (instancia,))
-    conn.commit()
+def ler_arquivo(caminho: Path) -> list[dict]:
+    """As batidas gravadas. Linha corrompida e PULADA, nao fatal.
+
+    Queda de energia no meio de um append deixa linha pela metade. Uma linha
+    ruim nao pode apagar a medicao inteira -- e o arquivo nao existir e o
+    caso normal da primeira execucao.
+    """
+    caminho = Path(caminho)
+    if not caminho.exists():
+        return []
+    saida = []
+    for linha in caminho.read_text(encoding="utf-8", errors="ignore").splitlines():
+        linha = linha.strip()
+        if not linha:
+            continue
+        try:
+            d = json.loads(linha)
+            quando = _instante(d["quando"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if quando is None:
+            continue
+        # Sem fuso, `lacunas` compararia naive com aware e levantaria.
+        if quando.tzinfo is None:
+            quando = quando.replace(tzinfo=timezone.utc)
+        saida.append({"instancia": d.get("instancia"), "quando": quando})
+    return saida
 
 
-def ler_batidas(conn, desde: datetime) -> list[dict]:
-    cur = conn.cursor()
-    cur.execute("SELECT instancia, quando FROM sac_listener_pulso "
-                "WHERE quando >= %s ORDER BY quando", (desde,))
-    return [{"instancia": i, "quando": q} for i, q in cur.fetchall()]
+def podar(caminho: Path, dias: int = 30) -> int:
+    """O pulso e barato, mas nao e eterno. Devolve quantas linhas sairam."""
+    caminho = Path(caminho)
+    batidas = ler_arquivo(caminho)
+    if not batidas:
+        return 0
+    corte = datetime.now(timezone.utc) - timedelta(days=dias)
+    fica = [b for b in batidas if b["quando"] >= corte]
+    if len(fica) == len(batidas):
+        return 0
+    caminho.write_text(
+        "".join(json.dumps({"instancia": b["instancia"],
+                            "quando": b["quando"].isoformat()}) + "\n"
+                for b in fica),
+        encoding="utf-8")
+    return len(batidas) - len(fica)
 
 
-def limpar_antigos(conn, dias: int = 30) -> int:
-    """O pulso e barato, mas nao e eterno."""
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM sac_listener_pulso "
-                    "WHERE quando < now() - make_interval(days => %s)", (dias,))
-        n = cur.rowcount
-    conn.commit()
-    return n
-
-
-def relatorio(horas: int = 24) -> int:
-    from src.db.connection import get_db_connection
-
-    conn = get_db_connection()
-    garantir_tabela(conn)
-
+def relatorio(horas: int = 24, caminho: Optional[Path] = None) -> int:
+    caminho = Path(caminho or ARQUIVO_PADRAO)
     fim = datetime.now(timezone.utc)
     inicio = fim - timedelta(hours=horas)
-    b = ler_batidas(conn, inicio)
+    b = [x for x in ler_arquivo(caminho) if x["quando"] >= inicio]
     ls = lacunas(b, inicio, fim)
     r = resumo(ls, inicio, fim)
 
@@ -212,11 +242,19 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--relatorio", action="store_true")
     ap.add_argument("--horas", type=int, default=24)
+    ap.add_argument("--arquivo", help="onde o pulso mora "
+                    f"(padrão: {ARQUIVO_PADRAO})")
+    ap.add_argument("--podar", type=int, metavar="DIAS",
+                    help="apaga pulsos mais velhos que DIAS")
     args = ap.parse_args()
+    caminho = Path(args.arquivo) if args.arquivo else ARQUIVO_PADRAO
+    if args.podar:
+        print(f"podados: {podar(caminho, args.podar)} pulso(s)")
+        return 0
     if not args.relatorio:
         ap.print_help()
         return 0
-    return relatorio(args.horas)
+    return relatorio(args.horas, caminho)
 
 
 if __name__ == "__main__":

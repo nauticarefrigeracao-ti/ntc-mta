@@ -426,23 +426,20 @@ async def _pulsar(instancia: str) -> None:
 
     Periodico de proposito, em vez de "avisar quando cair": processo que leva
     SIGKILL nao avisa nada -- ele so para de bater, e o silencio e o sinal.
-    Sem isto, "a janela e de segundos" continua sendo achismo meu.
-    """
-    from src.db.connection import get_db_connection
 
-    conn = None
+    Vai para ARQUIVO, nao para o Neon. O pulso de 30s segurava conexao aberta
+    24/7 e impedia o autosuspend: 182 CU-hours contra 100 do plano Free.
+    A instrumentacao derrubaria o banco que ela existe para vigiar.
+    """
+    caminho = listener_saude.ARQUIVO_PADRAO
     while True:
         try:
-            if conn is None:
-                conn = get_db_connection()
-                listener_saude.garantir_tabela(conn)
-            listener_saude.bater(conn, instancia)
+            listener_saude.bater_arquivo(caminho, instancia)
         except Exception as e:
             # O pulso e instrumentacao: se ele cair, o listener continua
             # trabalhando. Mas cai FALANDO -- medicao que some calada faz o
             # relatorio mentir para o lado bom.
             print(f"[pulso] falhou: {e!r}", file=sys.stderr, flush=True)
-            conn = None
         await asyncio.sleep(listener_saude.INTERVALO_S)
 
 

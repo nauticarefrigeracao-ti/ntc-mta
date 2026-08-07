@@ -175,3 +175,79 @@ def test_janela_de_duracao_zero_nao_divide_por_zero():
 def test_resumo_sem_lacuna_nenhuma():
     r = resumo([], INICIO, FIM)
     assert r["n"] == 0 and r["total_s"] == 0 and r["disponibilidade"] == 100.0
+
+
+# --- o pulso sai do Neon ---------------------------------------------------
+#
+# Medido em 07/08/2026: o Neon Free dá 100 CU-hours/mês. O pulso de 30s segura
+# conexão aberta 24/7, o que impede o autosuspend — 730h × 0,25 CU = 182
+# CU-hours, 82% ACIMA do teto. Estourar suspende o banco INTEIRO até o mês
+# seguinte: painel, jobs, listener, tudo.
+#
+# A medição existia no Neon porque runs do GitHub são efêmeros e vários, e o
+# banco era o único lugar compartilhado. Com um VPS só isso deixa de ser
+# verdade: o pulso vira arquivo local, custa zero CU-hour, e mede igual.
+
+import json
+
+from listener_saude import bater_arquivo, ler_arquivo, podar
+
+
+def test_batida_vai_para_o_arquivo(tmp_path):
+    a = tmp_path / "pulso.jsonl"
+    bater_arquivo(a, "vps-1")
+    b = ler_arquivo(a)
+    assert len(b) == 1 and b[0]["instancia"] == "vps-1"
+
+
+def test_batidas_acumulam(tmp_path):
+    a = tmp_path / "pulso.jsonl"
+    for _ in range(5):
+        bater_arquivo(a, "vps-1")
+    assert len(ler_arquivo(a)) == 5
+
+
+def test_arquivo_inexistente_nao_explode(tmp_path):
+    """Primeira execução não tem arquivo. Devolver vazio é certo; levantar
+    faria o relatório morrer no dia da estreia."""
+    assert ler_arquivo(tmp_path / "nao-existe.jsonl") == []
+
+
+def test_pasta_e_criada_sozinha(tmp_path):
+    a = tmp_path / "fundo" / "do" / "poco" / "pulso.jsonl"
+    bater_arquivo(a, "vps-1")
+    assert a.exists()
+
+
+def test_linha_corrompida_nao_derruba_o_relatorio(tmp_path):
+    """Queda de energia no meio de um append deixa linha pela metade. Uma
+    linha ruim não pode apagar a medição inteira."""
+    a = tmp_path / "pulso.jsonl"
+    bater_arquivo(a, "vps-1")
+    with a.open("a", encoding="utf-8") as f:
+        f.write('{"instancia": "vps-1", "quan\n')
+    bater_arquivo(a, "vps-1")
+    assert len(ler_arquivo(a)) == 2
+
+
+def test_batida_tem_fuso(tmp_path):
+    """Sem fuso, `lacunas` compara datetime naive com aware e levanta."""
+    a = tmp_path / "pulso.jsonl"
+    bater_arquivo(a, "vps-1")
+    assert ler_arquivo(a)[0]["quando"].tzinfo is not None
+
+
+def test_poda_corta_o_que_e_velho(tmp_path):
+    a = tmp_path / "pulso.jsonl"
+    velho = '{"instancia":"x","quando":"2020-01-01T00:00:00+00:00"}\n'
+    a.write_text(velho * 3, encoding="utf-8")
+    bater_arquivo(a, "vps-1")
+    assert podar(a, dias=30) == 3
+    assert len(ler_arquivo(a)) == 1
+
+
+def test_poda_em_arquivo_limpo_nao_faz_nada(tmp_path):
+    a = tmp_path / "pulso.jsonl"
+    bater_arquivo(a, "vps-1")
+    assert podar(a, dias=30) == 0
+    assert len(ler_arquivo(a)) == 1
