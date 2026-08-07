@@ -1,0 +1,28 @@
+[Unit]
+Description=Checagem de saude do SAC (dispara alerta no Slack se houve queda)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ntcsac
+Group=ntcsac
+WorkingDirectory=/opt/ntc-mta
+EnvironmentFile=/etc/ntc-sac/ambiente
+
+# Silencio quando esta bem. So grita acima de 15 min fora do ar em 24h, e nao
+# repete o mesmo aviso -- alerta demais vira ruido, e ruido vira gente
+# ignorando o canal.
+ExecStart=/opt/ntc-mta/.venv/bin/python /opt/ntc-mta/listener_saude.py --avisar --horas 24
+
+# O pulso e barato mas nao e eterno.
+ExecStartPost=/opt/ntc-mta/.venv/bin/python /opt/ntc-mta/listener_saude.py --podar 30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ntc-sac
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ntc-sac-saude

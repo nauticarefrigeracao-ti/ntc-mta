@@ -117,6 +117,41 @@ def resumo(ls: list, inicio: datetime, fim: datetime) -> dict:
     }
 
 
+# Abaixo disto, silencio nao vira alerta. Uma piscada de pulso por atraso de
+# rede nao e queda -- e gritar nisso ensina a ignorar o canal, que e como
+# monitoramento morre.
+GRITA_ACIMA_S = 15 * 60
+
+# Acima disto, grita de novo mesmo ja tendo avisado: 10h fora do ar nao e o
+# mesmo fato que 30min.
+GRITA_DE_NOVO_S = 4 * 3600
+
+
+def deve_gritar(total_s: float, maior_s: float, ja_avisado: bool) -> bool:
+    """Vale acordar alguem?
+
+    Olha o TOTAL, nao so a maior queda: vinte piscadas de dois minutos nao
+    aparecem no `maior`, mas 40 minutos fora do ar num dia e queda.
+    """
+    if total_s < GRITA_ACIMA_S:
+        return False
+    if ja_avisado and total_s < GRITA_DE_NOVO_S:
+        return False
+    return True
+
+
+def texto_do_alerta(total_s: float, maior_s: float, horas: int) -> str:
+    """O aviso, em portugues de gente. Quem le e a Thayna, nao um dev."""
+    return (
+        f"🔴 *O SAC ficou {fmt_dur(total_s)} fora do ar* nas últimas {horas}h "
+        f"(maior parada: {fmt_dur(maior_s)}).\n"
+        f"Nesse tempo, botão clicado no card *não foi registrado* — quem "
+        f"clicou viu erro e a marcação se perdeu.\n"
+        f"O que fazer está no runbook fixado neste canal. "
+        f"Se não resolver em 10 minutos, chame o Lucas."
+    )
+
+
 def fmt_dur(segundos: float) -> str:
     s = int(segundos)
     if s < 60:
@@ -238,9 +273,50 @@ def relatorio(horas: int = 24, caminho: Optional[Path] = None) -> int:
     return 1 if ls else 0
 
 
+def avisar(horas: int = 24, caminho: Optional[Path] = None,
+           canal: str = "#sac-fechamento") -> int:
+    """Grita no Slack se o SAC ficou fora do ar. Silencio quando esta bem.
+
+    Roda de hora em hora por timer no VPS. O estado do ultimo aviso mora ao
+    lado do pulso -- sem isso, a mesma queda viraria 24 mensagens por dia.
+    """
+    import slack_client
+
+    caminho = Path(caminho or ARQUIVO_PADRAO)
+    marca = caminho.with_suffix(".ultimo_alerta")
+
+    fim = datetime.now(timezone.utc)
+    inicio = fim - timedelta(hours=horas)
+    r = resumo(lacunas([x for x in ler_arquivo(caminho)
+                        if x["quando"] >= inicio], inicio, fim), inicio, fim)
+
+    ja = False
+    try:
+        anterior = _instante(marca.read_text(encoding="utf-8").strip())
+        ja = bool(anterior and (fim - anterior) < timedelta(hours=horas))
+    except OSError:
+        pass
+
+    if not deve_gritar(r["total_s"], r["maior_s"], ja):
+        print(f"sem alerta: {fmt_dur(r['total_s'])} fora em {horas}h "
+              f"({r['disponibilidade']:.2f}%)".replace(".", ","))
+        return 0
+
+    texto = texto_do_alerta(r["total_s"], r["maior_s"], horas)
+    if not slack_client.post_message(canal, texto):
+        print("ALERTA NAO ENVIADO ao Slack", file=sys.stderr)
+        return 1
+    marca.write_text(fim.isoformat(), encoding="utf-8")
+    print(f"alerta enviado: {fmt_dur(r['total_s'])} fora do ar")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--relatorio", action="store_true")
+    ap.add_argument("--avisar", action="store_true",
+                    help="grita no Slack se houve queda (silencio se OK)")
+    ap.add_argument("--canal", default="#sac-fechamento")
     ap.add_argument("--horas", type=int, default=24)
     ap.add_argument("--arquivo", help="onde o pulso mora "
                     f"(padrão: {ARQUIVO_PADRAO})")
@@ -251,6 +327,8 @@ def main() -> int:
     if args.podar:
         print(f"podados: {podar(caminho, args.podar)} pulso(s)")
         return 0
+    if args.avisar:
+        return avisar(args.horas, caminho, args.canal)
     if not args.relatorio:
         ap.print_help()
         return 0

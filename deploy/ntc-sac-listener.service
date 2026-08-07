@@ -1,0 +1,50 @@
+[Unit]
+# O processo que faz o botao do card virar acao.
+#
+# Sem ele no ar, a Maria clica e ve "Tivemos alguns problemas de conexao" --
+# e o clique se PERDE, porque o Slack nao reenvia interacao. Medido em
+# 06/08/2026 no ensaio do modal.
+Description=Listener do SAC (botoes do card no Slack)
+Documentation=https://github.com/nauticarefrigeracao-ti/ntc-mta
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ntcsac
+Group=ntcsac
+WorkingDirectory=/opt/ntc-mta
+
+# Segredos ficam FORA do repo, em arquivo 600 do proprio usuario.
+# SLACK_BOT_TOKEN, SLACK_APP_TOKEN, ML_NEON_URL, SAC_PULSO_ARQUIVO
+EnvironmentFile=/etc/ntc-sac/ambiente
+
+ExecStart=/opt/ntc-mta/.venv/bin/python /opt/ntc-mta/socket_sac.py
+
+# A razao de existir deste arquivo. Caiu, volta em 10s -- sem ninguem por
+# perto, inclusive em setembro.
+Restart=always
+RestartSec=10
+
+# Sem teto de tentativas: um pico de rede as 3h da manha nao pode deixar o
+# SAC morto ate alguem acordar. O padrao do systemd (5 falhas em 10s desiste)
+# faria exatamente isso.
+StartLimitIntervalSec=0
+
+# Reinicio suave: espera o clique em curso terminar antes de derrubar.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# Endurecimento basico. O processo so precisa de rede e de um arquivo.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ntc-sac
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ntc-sac-listener
+
+[Install]
+WantedBy=multi-user.target

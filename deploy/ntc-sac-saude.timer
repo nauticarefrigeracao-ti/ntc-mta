@@ -1,0 +1,21 @@
+[Unit]
+# O vigia do vigia.
+#
+# O listener reinicia sozinho -- mas se ele estiver reiniciando em laco, ou
+# se o VPS inteiro cair, ninguem fica sabendo. Este timer confere de hora em
+# hora e grita no Slack quando houve queda de verdade.
+Description=Confere a saude do listener do SAC e avisa no Slack
+
+[Timer]
+OnCalendar=hourly
+
+# Se o VPS estava desligado na hora marcada, roda assim que voltar. Sem isto,
+# uma queda de energia de madrugada passaria sem aviso nenhum.
+Persistent=true
+
+# Espalha o disparo para nao bater no Slack no segundo cheio junto com todo
+# mundo.
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

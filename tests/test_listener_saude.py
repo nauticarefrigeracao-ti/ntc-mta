@@ -251,3 +251,67 @@ def test_poda_em_arquivo_limpo_nao_faz_nada(tmp_path):
     bater_arquivo(a, "vps-1")
     assert podar(a, dias=30) == 0
     assert len(ler_arquivo(a)) == 1
+
+
+# --- o alerta que grita sozinho -------------------------------------------
+#
+# Hoje o relatório de saúde só existe se alguém rodar. Em setembro não vai
+# ter ninguém para rodar. O monitoramento precisa gritar no Slack por conta
+# própria — e o desenho do alerta é onde monitoramento morre:
+#
+# Alerta demais vira ruído, e ruído vira gente ignorando o canal. Alerta de
+# menos é o silêncio que a gente já tem. O ponto é gritar POUCO e CERTO.
+
+from listener_saude import deve_gritar, texto_do_alerta
+
+
+def test_sem_lacuna_nao_grita():
+    assert not deve_gritar(total_s=0, maior_s=0, ja_avisado=False)
+
+
+def test_piscada_curta_nao_grita():
+    """Um pulso perdido por atraso de rede não é queda. Gritar nisso ensina
+    a ignorar o canal."""
+    assert not deve_gritar(total_s=100, maior_s=100, ja_avisado=False)
+
+
+def test_queda_de_verdade_grita():
+    assert deve_gritar(total_s=1800, maior_s=1800, ja_avisado=False)
+
+
+def test_nao_repete_o_mesmo_alerta():
+    """Checagem de hora em hora com a mesma queda mandaria 24 mensagens por
+    dia sobre o mesmo fato."""
+    assert not deve_gritar(total_s=1800, maior_s=1800, ja_avisado=True)
+
+
+def test_queda_longa_grita_mesmo_ja_avisado():
+    """10h fora do ar não é o mesmo fato de 30min. Piorou muito, avisa de
+    novo."""
+    assert deve_gritar(total_s=36000, maior_s=36000, ja_avisado=True)
+
+
+def test_muitas_quedas_curtas_somam_e_gritam():
+    """Vinte piscadas de 2min não aparecem no `maior`, mas 40min fora do ar
+    num dia é queda."""
+    assert deve_gritar(total_s=2400, maior_s=120, ja_avisado=False)
+
+
+def test_alerta_diz_quanto_tempo_e_o_que_fazer():
+    t = texto_do_alerta(total_s=1800, maior_s=1800, horas=24)
+    assert "30min" in t
+    assert "runbook" in t.lower() or "fazer" in t.lower()
+
+
+def test_alerta_nao_usa_jargao():
+    """Quem lê é a Thayná, não um dev."""
+    t = texto_do_alerta(total_s=1800, maior_s=1800, horas=24).lower()
+    for palavra in ("socket", "websocket", "systemd", "daemon", "cu-hour",
+                    "timeout", "exception"):
+        assert palavra not in t
+
+
+def test_alerta_diz_o_efeito_pratico():
+    """Número sem consequência não move ninguém."""
+    t = texto_do_alerta(total_s=1800, maior_s=1800, horas=24).lower()
+    assert "clique" in t or "botão" in t or "botao" in t
