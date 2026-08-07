@@ -449,12 +449,19 @@ async def _coletar_do_meli() -> None:
     """
     while True:
         try:
+            import card_maria
             import em_transito
 
             c = em_transito.coletar()
             print(f"[coleta] {c['com_previsao']} de {c['casos']} casos com "
                   f"previsão · {c.get('loja', 0)} loja / {c.get('full', 0)} full",
                   flush=True)
+            for canal in ("#sac", "#sac-teste"):
+                try:
+                    card_maria.publicar(canal=canal)
+                except Exception as ex:
+                    print(f"[coleta] falha ao atualizar cards em {canal}: {ex!r}",
+                          file=sys.stderr, flush=True)
         except Exception as e:
             # Coleta e alimentacao, nao o coracao: se ela falhar, os botoes
             # continuam funcionando. Mas falha FALANDO -- coleta que morre
