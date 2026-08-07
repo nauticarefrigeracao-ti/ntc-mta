@@ -297,3 +297,61 @@ def test_cofrinho_de_ensaio_diz_que_nao_e_dinheiro():
 def test_cofrinho_oficial_nao_tem_selo():
     txt = str(blocos_do_cofrinho(acumular([], *AGOSTO), HOJE, ensaio=False))
     assert "ensaio" not in txt.lower()
+
+
+# --- o Quadro precisa mostrar o trabalho da Maria, não só a fila ----------
+#
+# Pedido do Lucas em 07/08/2026: "o quadro do SAC tem que refletir isso aí —
+# cofrinho, casos resolvidos nos dias, os desfechos. Daí tem que atualizar.
+# O quadro ficará como registro e visualização do trabalho da Maria".
+#
+# Hoje o Quadro só mostra FILA: o que falta fazer. Quem trabalhou o dia
+# inteiro e fechou seis casos vê a mesma tela de quem não fez nada — só que
+# com menos itens. Falta o outro lado: o que foi FEITO.
+#
+# E o carimbo de frescor: sem ele, ninguém sabe se está olhando dado de agora
+# ou de ontem. Foi exatamente assim que a tabela `orders` ficou 13 dias
+# congelada sem ninguém perceber.
+
+from cofrinho import linha_de_desfechos, texto_de_frescor
+
+
+def test_desfechos_do_dia_aparecem():
+    r = acumular([caso(1, 509.89, FECHADO_A_FAVOR),
+                  caso(2, 200.0, FECHADO_CONTRA)], *AGOSTO)
+    t = linha_de_desfechos(r, HOJE)
+    assert "509,89" in t and "200,00" in t
+
+
+def test_dia_sem_desfecho_diz_isso_sem_parecer_erro():
+    """Dia sem caso fechado é normal — não pode parecer sistema quebrado."""
+    t = linha_de_desfechos(acumular([], *AGOSTO), HOJE).lower()
+    assert "nenhum" in t or "ainda" in t
+
+
+def test_desfechos_dizem_quantos_casos():
+    r = acumular([caso(1, 100.0, FECHADO_A_FAVOR),
+                  caso(2, 100.0, FECHADO_A_FAVOR)], *AGOSTO)
+    assert "2" in linha_de_desfechos(r, HOJE)
+
+
+def test_frescor_diz_ha_quanto_tempo():
+    """"Atualizado 07/08" não responde a pergunta. "Há 4 minutos" responde."""
+    assert "4 minuto" in texto_de_frescor(4 * 60)
+
+
+def test_frescor_recente_tranquiliza():
+    t = texto_de_frescor(30).lower()
+    assert "agora" in t
+
+
+def test_frescor_velho_avisa():
+    """Acima de meia hora a Maria pode estar agindo sobre informação de outro
+    turno — e precisa saber disso antes de agir, não depois."""
+    t = texto_de_frescor(3 * 3600)
+    assert "⚠" in t or "atras" in t.lower() or "atrás" in t.lower()
+
+
+def test_frescor_sem_dado_nao_mente():
+    """"Atualizado agora" quando não se sabe é a pior das respostas."""
+    assert "?" in texto_de_frescor(None) or "não" in texto_de_frescor(None)

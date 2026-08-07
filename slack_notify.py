@@ -831,7 +831,36 @@ def montar_canvas_quadro(rows, data_str: str,
     else:
         L.append("_Casos encerrados. O balanço em R$ sai no #sac-fechamento._")
     L.append("")
+
+    # O Quadro so mostrava FILA. Quem fechou seis casos via a mesma tela de
+    # quem nao fez nada, so que com menos itens. Pedido do Lucas em
+    # 07/08/2026: "o quadro fica como registro e visualizacao do trabalho da
+    # Maria".
+    try:
+        import cofrinho
+        from src.db.connection import get_db_connection
+
+        conn = get_db_connection()
+        hoje_d = datetime.now(cofrinho.BRT).date()
+        resumo = cofrinho.acumular(
+            cofrinho.carregar(conn, hoje_d.year, hoje_d.month),
+            hoje_d.year, hoje_d.month)
+        L.append("## 📒 O que foi fechado hoje")
+        L.append(cofrinho.linha_de_desfechos(resumo, hoje_d))
+        L.append("")
+        cur = conn.cursor()
+        cur.execute("SELECT EXTRACT(EPOCH FROM (now() - MAX(synced_at))) "
+                    "FROM ml_devolucoes WHERE claim_status = 'opened'")
+        idade = cur.fetchone()[0]
+        frescor = cofrinho.texto_de_frescor(
+            float(idade) if idade is not None else None)
+    except Exception as e:
+        # O Quadro nao pode deixar de sair porque o rodape falhou.
+        print(f"[quadro] rodape falhou: {e!r}", file=sys.stderr)
+        frescor = "🕐 não sei de quando é este dado"
+
     L.append("---")
+    L.append(f"_{frescor}_")
     L.append(f"_Atualizado automaticamente · {data_str}_")
 
     return "\n".join(L)

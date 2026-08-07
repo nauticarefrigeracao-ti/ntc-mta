@@ -257,7 +257,12 @@ def coletar(limite: Optional[int] = None) -> dict:
                 return_estimated_delivery = COALESCE(%(prev)s, return_estimated_delivery),
                 return_destino = %(dest)s,
                 return_transportadora = COALESCE(%(tp)s, return_transportadora),
-                return_metodo = COALESCE(%(mt)s, return_metodo)
+                return_metodo = COALESCE(%(mt)s, return_metodo),
+                -- Carimbo de quando CONFERIMOS no ML. E o que
+                -- permite o card dizer "ha 4 minutos" em vez
+                -- de "atualizado 07/08", que nao responde a
+                -- pergunta que a Maria tem.
+                synced_at = now()
             WHERE claim_id = %(cid)s
         """, {"cid": claim_id, "rid": r["return_id"], "st": r["status"],
               "sid": r["shipment_id"], "trk": r["tracking_number"],

@@ -157,6 +157,49 @@ def acumular(casos: Iterable[Mapping[str, Any]], ano: int, mes: int,
     return r
 
 
+# Acima disto, o dado na tela e de outro turno e a Maria precisa saber ANTES
+# de agir, nao depois. Meia hora e o ponto em que "ha pouco" deixa de ser
+# verdade para quem esta atendendo.
+FRESCOR_AVISA_S = 30 * 60
+
+
+def texto_de_frescor(segundos: Optional[float]) -> str:
+    """Ha quanto tempo o dado foi conferido no Mercado Livre.
+
+    "Atualizado 07/08" nao responde a pergunta que a Maria tem. "Ha 4
+    minutos" responde. E quando nao se sabe, dizer que nao se sabe -- porque
+    "atualizado agora" sem base e a pior das respostas.
+    """
+    if segundos is None:
+        return "🕐 não sei de quando é este dado"
+    s = int(segundos)
+    if s < 90:
+        return "🕐 conferido com o Mercado Livre agora há pouco"
+    if s < 3600:
+        n = s // 60
+        return f"🕐 conferido com o Mercado Livre há {n} minuto{'s' * (n != 1)}"
+    h, m = s // 3600, (s % 3600) // 60
+    aviso = "⚠️ " if s >= FRESCOR_AVISA_S else ""
+    return (f"{aviso}conferido com o Mercado Livre há {h}h{m:02d} — "
+            f"pode haver mudança que ainda não apareceu aqui")
+
+
+def linha_de_desfechos(resumo: Mapping[str, Any], hoje: date) -> str:
+    """O que a Maria FECHOU hoje -- o outro lado da fila.
+
+    O Quadro so mostrava o que falta fazer. Quem trabalhou o dia inteiro e
+    fechou seis casos via a mesma tela de quem nao fez nada, so que com menos
+    itens. Sem isto, o Quadro e cobranca; com isto, e registro do trabalho.
+    """
+    d = (resumo.get("por_dia") or {}).get(hoje)
+    if not d:
+        return "_Nenhum caso fechado hoje ainda._"
+    n = d["n_positivo"] + d["n_negativo"]
+    return (f"*{n} caso{'s' * (n != 1)} fechado{'s' * (n != 1)} hoje* — "
+            f"🟢 seguramos {_fmt_brl(d['positivo'])} ({d['n_positivo']}) · "
+            f"🔴 escapou {_fmt_brl(d['negativo'])} ({d['n_negativo']})")
+
+
 def eh_ensaio(cid: Optional[str], oficial: Optional[str]) -> bool:
     """Este canal e de treino?
 
