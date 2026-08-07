@@ -20,7 +20,7 @@ name: Balanco Mensal do SAC
 
 on:
   schedule:
-    - cron: '0 11 * * *'   # ~08:00 BRT (o Actions atrasa; para relatorio, tudo bem)
+    - cron: '41 11 * * *'   # ~08:00 BRT (o Actions atrasa; para relatorio, tudo bem)
   workflow_dispatch:
     inputs:
       mes:

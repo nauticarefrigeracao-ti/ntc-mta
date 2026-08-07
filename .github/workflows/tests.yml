@@ -1,14 +1,35 @@
 name: Testes (pytest)
 
+# O portao. Se ficar vermelho por motivo que nao e defeito, ele deixa de ser
+# portao -- vira ruido que todo mundo aprende a ignorar. Duas correcoes de
+# 07/08/2026 vieram de olhar o painel de 7 dias:
+#
+#   - 6 "falhas" de 16 runs. Uma delas era ModuleNotFoundError: psycopg2,
+#     de antes do requirements ganhar a dependencia; as outras foram do
+#     incidente critico do Actions em 06/08 (webhooks estrangulados a 15%).
+#   - sem `timeout-minutes`, um job preso na fila segura recurso ate o teto
+#     de 6h do Actions.
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
+# Push em rajada (o normal aqui) criava um run por commit, todos rodando a
+# mesma suite. Cancelar o anterior e CORRETO neste caso: o resultado que vale
+# e o do codigo mais novo. Diferente do notificador, onde cancelar perderia
+# trabalho.
+concurrency:
+  group: testes-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A suite roda em ~1s local. 10 min e folga de sobra; alem disso e fila
+    # ou travamento, nao teste.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -23,4 +44,4 @@ jobs:
           pip install -r requirements.txt
 
       - name: Rodar testes das funcoes puras
-        run: pytest tests/ -v
+        run: pytest tests/ -q

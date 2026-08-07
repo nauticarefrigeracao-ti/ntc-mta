@@ -19,7 +19,7 @@ name: Notificador Slack do SAC
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '17 */2 * * *'
   workflow_dispatch:
     inputs:
       minutos:
@@ -36,6 +36,24 @@ on:
 # #sac). cancel-in-progress=false: o novo espera o atual terminar, nunca corta
 # um envio pela metade. Com a janela de 5h30, a partida seguinte fica pendente
 # e assume no instante em que a atual encerra -- cobertura sem buraco.
+#
+# O QUE ISSO CUSTA, e que nao estava escrito aqui: o GitHub deixa apenas UM
+# run pendente por grupo. Do terceiro em diante, o cron novo CANCELA o que
+# estava esperando -- "any existing pending job or workflow in the same
+# concurrency group will be canceled".
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency
+#
+# Medido em 07/08/2026:
+#   #281 criado 05:28:19 -> cancelado 07:02:35 (9s apos #282 nascer)
+#   #282 criado 07:02:26 -> cancelado 08:48:41 (1s apos #283 nascer)
+#   #283 criado 08:48:40 -> cancelado 10:43:45 (1s apos #284 nascer)
+#
+# A cobertura continua inteira (#279 -> #280 -> #284 encadeados, sem vao) --
+# o desenho funciona. O efeito colateral e cosmetico e perigoso: cancelamento
+# aparece como "falha" no painel do Actions, e em 7 dias foram 18 de 56 runs.
+# Quem olha o painel conclui que o notificador falha 32% das vezes; a falha
+# REAL e 3 de 56 (5,4%). Painel que mente para o lado ruim ensina a ignorar o
+# painel -- que e exatamente o que nao pode acontecer em setembro.
 concurrency:
   group: notify-slack-sac
   cancel-in-progress: false

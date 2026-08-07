@@ -9,7 +9,7 @@ name: Confianca dos Numeros
 
 on:
   schedule:
-    - cron: '0 11 * * *'   # 8h BRT, antes do fechamento diario (12h UTC)
+    - cron: '23 11 * * *'   # 8h BRT, antes do fechamento diario (12h UTC)
   push:
     branches: [main]
     paths:

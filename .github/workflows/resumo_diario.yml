@@ -2,7 +2,7 @@ name: Fechamento Diario do SAC
 
 on:
   schedule:
-    - cron: '0 12 * * *'
+    - cron: '13 12 * * *'
   workflow_dispatch:
 
 concurrency:

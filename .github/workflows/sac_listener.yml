@@ -42,7 +42,7 @@ name: Listener do SAC (botoes do card da Maria)
 
 on:
   schedule:
-    - cron: '0 */2 * * *'
+    - cron: '47 */2 * * *'
   workflow_dispatch:
     inputs:
       minutos:
