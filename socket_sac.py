@@ -371,6 +371,74 @@ def aplicar_clique(evento: Mapping[str, Any]) -> str:
 COLETA_MIN = 10
 
 
+def deve_sair_por_versao(meu_sha: Optional[str], sha_do_main: Optional[str],
+                         tem_run_mais_novo: bool) -> bool:
+    """Este listener ficou velho e ja ha quem o substitua?
+
+    Medido em 07/08/2026: QUATRO runs no ar com TRES versoes de codigo. O
+    Slack distribui cada clique entre as conexoes abertas, entao metade caia
+    no codigo antigo -- e o botao do WhatsApp aparecia ou nao, conforme a
+    sorte. Dois avisos seguidos no canal chegaram a se contradizer.
+
+    Sai SO quando ha substituto no ar. Codigo velho servindo e ruim; ninguem
+    servindo e pior, e um run que sai sozinho sem sucessor abre buraco ate o
+    proximo cron -- que a medicao do vigia mostra chegar em ~100 minutos.
+
+    Sem SHA (rodando na maquina ou no VPS), nao sai: la o deploy reinicia o
+    processo e este problema nao existe.
+    """
+    if not meu_sha or not sha_do_main:
+        return False
+    return meu_sha != sha_do_main and tem_run_mais_novo
+
+
+def _estado_do_repo() -> tuple[Optional[str], bool]:
+    """(sha do main, existe run mais novo deste workflow rodando)."""
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    meu_run = os.environ.get("GITHUB_RUN_ID")
+    if not repo:
+        return None, False
+
+    def _api(caminho: str):
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/{caminho}",
+            headers={"Accept": "application/vnd.github+json",
+                     "User-Agent": "ntc-sac-listener"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read())
+
+    sha = (_api("commits/main") or {}).get("sha")
+    corridas = (_api("actions/workflows/sac_listener.yml/runs"
+                     "?status=in_progress&per_page=20") or {})
+    mais_novo = any(
+        str(w.get("id")) != str(meu_run)
+        and str(w.get("id")) > str(meu_run or "")
+        for w in corridas.get("workflow_runs", []))
+    return sha, mais_novo
+
+
+async def _vigiar_versao() -> None:
+    """Encerra o processo quando ele ficou obsoleto e ha substituto."""
+    meu = os.environ.get("GITHUB_SHA")
+    if not meu:
+        return
+    while True:
+        await asyncio.sleep(5 * 60)
+        try:
+            sha, mais_novo = _estado_do_repo()
+            if deve_sair_por_versao(meu, sha, mais_novo):
+                print(f"encerrando: código mudou ({meu[:7]} -> {sha[:7]}) e "
+                      f"já há run mais novo no ar", flush=True)
+                # SIGTERM em si mesmo: o `finally` de escutar() cancela as
+                # tarefas e fecha os sockets, em vez de morrer no meio.
+                raise SystemExit(0)
+        except SystemExit:
+            raise
+        except Exception as e:
+            print(f"[versão] não consegui conferir: {e!r}", file=sys.stderr,
+                  flush=True)
+
+
 async def _coletar_do_meli() -> None:
     """Busca previsao, destino e estado no ML enquanto o listener vive.
 
@@ -490,6 +558,7 @@ async def escutar(duracao_min: Optional[int] = None) -> int:
     pulso = asyncio.create_task(
         _pulsar(listener_saude.nome_da_instancia()))
     coleta = asyncio.create_task(_coletar_do_meli())
+    versao = asyncio.create_task(_vigiar_versao())
 
     # Redundancia ativa-ativa, como a doc do Slack recomenda: enquanto uma
     # conexao e refrescada, a outra continua recebendo. `vistos` e
@@ -499,12 +568,21 @@ async def escutar(duracao_min: Optional[int] = None) -> int:
                 for n in range(CONEXOES)]
     try:
         restante = (ate - time.monotonic()) if ate else None
-        await asyncio.wait(conexoes, timeout=restante)
+        # O vigia de versao entra no wait: se ele levantar
+        # SystemExit, o processo sai limpo em vez de seguir
+        # atendendo com codigo obsoleto.
+        pronto, _ = await asyncio.wait(
+            [*conexoes, versao], timeout=restante,
+            return_when=asyncio.FIRST_COMPLETED)
+        for t in pronto:
+            if t is versao and not t.cancelled():
+                t.result()   # propaga o SystemExit
         print("encerrando: prazo do job cumprido", flush=True)
         return 0
     finally:
         pulso.cancel()
         coleta.cancel()
+        versao.cancel()
         for c in conexoes:
             c.cancel()
 

@@ -48,7 +48,11 @@ PERMITIDO = {
     "reembolsado":   {"finalizar"},
     # O WhatsApp é SEGUNDA TENTATIVA: só existe depois da recusa.
     "recusado":      {"whatsapp", "finalizar"},
-    "whatsapp":      {"reembolsado", "finalizar"},
+    # A segunda tentativa também termina em DECISÃO, não em "finalizar"
+    # direto. E o desfecho é "sem acordo", não "recusado" de novo — voltar
+    # criaria ciclo, e ciclo contaria o mesmo dinheiro duas vezes.
+    "whatsapp":      {"reembolsado", "sem_acordo"},
+    "sem_acordo":    {"finalizar"},
     "finalizado":    set(),
 }
 
@@ -123,8 +127,8 @@ CAMINHOS = list(todos_os_caminhos())
 
 def test_o_desenho_tem_dezesseis_caminhos():
     """2 (estoque|garantia) × 2 (mediação|sem argumento) × 4 desfechos:
-    reembolsado→fim, recusado→fim, recusado→whatsapp→fim, e
-    recusado→whatsapp→reembolsado→fim. Se esse número mudar, o fluxo mudou —
+    reembolsado→fim, recusado→fim, recusado→whatsapp→reembolsado→fim, e
+    recusado→whatsapp→sem_acordo→fim. Se esse número mudar, o fluxo mudou —
     e mudar o fluxo da Maria sem avisar é o que quebra treinamento."""
     assert len(CAMINHOS) == 16
 

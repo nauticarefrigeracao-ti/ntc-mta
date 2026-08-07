@@ -326,3 +326,47 @@ def test_a_coleta_nao_martela_a_api():
     """Abaixo de 5 min são 288 ciclos/dia sem ganho — o estado de uma
     devolução não muda a cada 3 minutos."""
     assert COLETA_MIN >= 5
+
+
+# --- listener velho não pode continuar atendendo --------------------------
+#
+# Medido em 07/08/2026: havia QUATRO runs do listener no ar ao mesmo tempo,
+# com TRÊS versões diferentes de código (cba7e2a, d59f0ef, e2469df). Como o
+# Slack distribui cada clique entre as conexões abertas, metade dos cliques
+# caía no código velho.
+#
+# O Lucas viu o efeito na tela: clicou em "Recusado" e o botão do WhatsApp
+# não apareceu — porque aquele clique foi atendido por um listener que não
+# conhecia o WhatsApp ainda. E dois avisos seguidos no canal se contradiziam:
+#
+#   14h50  'whatsapp' não é possível em 'Recusado'. Disponíveis: [finalizar…]
+#   15h02  'recusado' não é possível em 'Recusado'. Disponíveis: [whatsapp…]
+#
+# Um run de 5h30 continua servindo com o código de quando nasceu. No VPS com
+# systemd isso não existe — o deploy reinicia o processo. Enquanto estamos no
+# Actions, o listener precisa perceber sozinho que ficou velho.
+
+from socket_sac import deve_sair_por_versao
+
+
+def test_versao_igual_continua_no_ar():
+    assert not deve_sair_por_versao("abc123", "abc123", tem_run_mais_novo=True)
+
+
+def test_versao_velha_com_substituto_sai():
+    """Só sai quando já existe outro run atendendo — senão o canal fica sem
+    ninguém escutando, que é pior que atender com código velho."""
+    assert deve_sair_por_versao("abc123", "def456", tem_run_mais_novo=True)
+
+
+def test_versao_velha_sem_substituto_fica():
+    """Sair aqui abriria um buraco até o próximo cron. Código velho servindo
+    é ruim; ninguém servindo é pior."""
+    assert not deve_sair_por_versao("abc123", "def456", tem_run_mais_novo=False)
+
+
+def test_sem_saber_a_versao_nao_sai():
+    """Rodando fora do Actions (na máquina, no VPS) não há SHA para comparar.
+    Na dúvida, continua trabalhando."""
+    assert not deve_sair_por_versao(None, "def456", tem_run_mais_novo=True)
+    assert not deve_sair_por_versao("abc123", None, tem_run_mais_novo=True)

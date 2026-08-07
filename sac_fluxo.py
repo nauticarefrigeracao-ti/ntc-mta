@@ -6,7 +6,8 @@
                  -> (5) finalizar
 
                  e, SO depois de recusado:
-                 -> whatsapp (segunda tentativa) -> reembolsado | finalizar
+                 -> whatsapp (segunda tentativa)
+                    -> reembolsado | sem acordo -> finalizar
 
 Tres decisoes que este modulo toma, e por que:
 
@@ -83,11 +84,24 @@ _ESCADA: dict[str, list[tuple[str, str, str, Optional[str]]]] = {
         ("whatsapp", "whatsapp", "💬 Tentar no WhatsApp", None),
         ("finalizar", "finalizado", "✅ Finalizar", "primary"),
     ],
-    # A segunda tentativa tem dois fins: virou reembolso, ou ficou como
-    # estava e se encerra. Voltar para "recusado" daqui criaria um ciclo --
-    # e ciclo permitiria contar o mesmo dinheiro duas vezes no cofrinho.
+    # A segunda tentativa tambem termina em DECISAO, nao em "finalizar"
+    # direto -- correcao do Lucas em 07/08/2026, clicando no card: "tinha que
+    # aparecer a opcao apos o clique de whatsapp, e SO APOS, finalizar, que e
+    # a ultima coisa do fluxo".
+    #
+    # O desfecho aqui e "sem acordo", nao "recusado" de novo: voltar para
+    # recusado criaria ciclo, e ciclo permitiria contar o mesmo dinheiro duas
+    # vezes no cofrinho. "Sem acordo" tambem e o nome honesto do que
+    # aconteceu -- a conversa nao mudou o resultado, e o caso continua sendo
+    # o recusado que ja era.
     "whatsapp": [
         ("reembolsado", "reembolsado", "💸 Reembolsado", None),
+        ("sem_acordo", "sem_acordo", "❌ Não houve acordo", "danger"),
+    ],
+    # Fim de linha: so encerrar. O dinheiro ja foi decidido no "recusado"
+    # anterior, e por isso `sem_acordo` NAO entra em _COFRINHO -- se
+    # entrasse, contaria o mesmo caso duas vezes.
+    "sem_acordo": [
         ("finalizar", "finalizado", "✅ Finalizar", "primary"),
     ],
     "finalizado": [],
@@ -101,6 +115,7 @@ _ROTULOS = {
     "mediacao": "Em mediação",
     "whatsapp": "Falando no WhatsApp",
     "sem_argumento": "Sem argumento",
+    "sem_acordo": "Sem acordo no WhatsApp",
     "reembolsado": "Reembolsado",
     "recusado": "Recusado",
     "finalizado": "Finalizado",
@@ -116,6 +131,7 @@ _ETAPAS = {
     "sem_argumento": "🚫 Sem argumento",
     "reembolsado": "💸 Reembolsado",
     "recusado": "❌ Recusado",
+    "sem_acordo": "❌ Não houve acordo no WhatsApp",
     "finalizar": "✅ Finalizado",
     "observacao": "📝 Observação",
     "supervisor": "🆙 Encaminhado ao supervisor",
